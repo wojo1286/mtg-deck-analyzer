@@ -96,16 +96,16 @@ def run_scraper(commander_slug, deck_limit):
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards)
 
 @st.cache_data
-def clean_and_prepare_data(df, categories_df=None):
+def clean_and_prepare_data(_df, _categories_df=None):
     """Applies cleaning, categorization, and pre-calculation to the raw DataFrame."""
-    dfc = df.copy()
+    dfc = _df.copy()
     dfc['price_clean'] = pd.to_numeric(dfc.get('price', '').astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce')
     dfc['cmc'] = pd.to_numeric(dfc.get('cmc'), errors='coerce')
     dfc['type'] = dfc.get('type', 'Unknown').fillna('Unknown')
     
     functional_analysis_enabled = False
-    if categories_df is not None and not categories_df.empty:
-        dfc = pd.merge(dfc, categories_df, on='name', how='left')
+    if _categories_df is not None and not _categories_df.empty:
+        dfc = pd.merge(dfc, _categories_df, on='name', how='left')
         dfc['category'] = dfc['category'].fillna('Uncategorized')
         functional_analysis_enabled = True
     
@@ -139,6 +139,15 @@ def build_cococcurrence(source_df: pd.DataFrame, topN: int, exclude_staples_n: i
 def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
     """Helper function to run the slot-filling algorithm."""
     decklist, used_cards = list(initial_decklist), set(initial_decklist)
+    
+    # Pre-populate current counts from initial decklist
+    initial_df = candidates_df[candidates_df['name'].isin(initial_decklist)]
+    for _, card in initial_df.iterrows():
+        if card['type'] in constraints['types']: constraints['types'][card['type']]['current'] += 1
+        if isinstance(card.get('category_list'), list):
+            for func in card['category_list']:
+                if func in constraints['functions']: constraints['functions'][func]['current'] += 1
+
     for _, card in candidates_df.iterrows():
         if len(decklist) >= 100 or card['name'] in used_cards: continue
         can_add = True
@@ -170,8 +179,6 @@ st.title("MTG Deckbuilding Analysis Tool")
 
 # --- Sidebar for Data Source ---
 st.sidebar.header("Data Source")
-# ... (Data source logic remains the same as previous version) ...
-
 df_raw = None
 categories_df = None
 if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
@@ -200,7 +207,6 @@ if df_raw is not None:
     df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df)
     st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
-    # --- Main Dashboard ---
     st.header("Dashboard & Analysis")
     col1, col2 = st.columns(2)
     with col1:
@@ -219,7 +225,6 @@ if df_raw is not None:
     spells_df = filtered_df[~filtered_df['type'].str.contains('Land', na=False)]
     lands_df = filtered_df[filtered_df['type'].str.contains('Land', na=False)]
 
-    # --- Display Charts ---
     st.subheader("Top Spells, Lands & Curves")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -247,7 +252,6 @@ if df_raw is not None:
             with fc2:
                 box_fig = px.box(func_df, x='category_list', y='cmc', title='CMC Distribution by Function'); st.plotly_chart(box_fig, use_container_width=True)
 
-    # --- Personal Deckbuilding Tools Expander ---
     with st.expander("Personal Deckbuilding Tools", expanded=True):
         st.subheader("Analyze Your Decklist")
         decklist_input = st.text_area("Paste your decklist here:", height=200, key="deck_analyzer_input")
@@ -264,17 +268,66 @@ if df_raw is not None:
 
         st.subheader("Generate a Deck Template")
         if FUNCTIONAL_ANALYSIS_ENABLED:
-            template_must_haves = st.text_area("Add must-include cards (one per line):", key="template_must_haves")
-            # ... (Full template generator UI and logic would go here)
-            if st.button("📋 Generate Deck With Constraints"):
-                st.info("Deck template generator logic would be executed here.")
+            # ... (Full template generator implementation)
+            st.info("Deck template generator UI and logic will be fully implemented in the final version.")
         else:
             st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
 
-    # --- Advanced Synergy Tools Expander ---
     with st.expander("Advanced Synergy Tools", expanded=False):
-        # ... (Full implementation for Card Inspector, Synergy Map, Heatmap, and Packages)
-        st.info("All advanced synergy tools would be fully implemented here.")
+        st.subheader("Card Inspector")
+        all_spells_list = sorted(spells_df['name'].unique())
+        if all_spells_list:
+            selected_card = st.selectbox("Select a card to inspect:", all_spells_list)
+            if selected_card:
+                decks_with_card = df[df['name'] == selected_card]['deck_id'].unique()
+                synergy_df = df[df['deck_id'].isin(decks_with_card)]
+                synergy_pop = popularity_table(synergy_df)
+                synergy_pop = synergy_pop[synergy_pop['name'] != selected_card]
+                st.write(f"Top 20 cards played with '{selected_card}':")
+                st.dataframe(synergy_pop.head(20))
+        
+        st.subheader("Synergy Map")
+        if st.button("🗺️ Create Synergy Map"):
+            with st.spinner("Generating Synergy Map..."):
+                deck_card_matrix = pd.crosstab(spells_df['deck_id'], spells_df['name'])
+                tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(deck_card_matrix.columns)-1), max_iter=1000)
+                embedding = tsne.fit_transform(deck_card_matrix.T)
+                plot_df = pd.DataFrame(embedding, columns=['x', 'y'])
+                plot_df['card_name'] = deck_card_matrix.columns
+                plot_df = pd.merge(plot_df, df[['name', 'type']].drop_duplicates().rename(columns={'name': 'card_name'}), on='card_name', how='left')
+                fig = px.scatter(plot_df, x='x', y='y', hover_name='card_name', color='type', title='Card Synergy Map', height=800)
+                st.plotly_chart(fig, use_container_width=True)
+            
+        st.subheader("Synergy Heatmap")
+        h_col1, h_col2 = st.columns(2)
+        with h_col1:
+            heatmap_top_n = st.slider('Top N for Heatmap:', 10, 50, 25, 5)
+        with h_col2:
+            heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1)
+        if st.button("🔥 Build Heatmap"):
+             with st.spinner("Building Heatmap..."):
+                co = build_cococcurrence(df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
+                if co.empty: st.warning("Co-occurrence matrix is empty.")
+                else:
+                    title = f'Card Co-occurrence (Top {heatmap_top_n}, excluding {heatmap_exclude_n})'
+                    fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=700)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Synergy Packages")
+        COMMON_STAPLES = ['Sol Ring', 'Arcane Signet', 'Command Tower', 'Lightning Greaves', 'Swiftfoot Boots']
+        packages_exclude_staples = st.multiselect('Exclude Staples from Packages:', options=COMMON_STAPLES, default=['Sol Ring', 'Arcane Signet'])
+        packages_support_slider = st.slider('Min Support %:', 0.1, 0.7, 0.3, 0.05)
+        if st.button("📦 Find Synergy Packages"):
+            with st.spinner("Finding packages..."):
+                spells_to_analyze = spells_df[~spells_df['name'].isin(packages_exclude_staples)]
+                deck_card_matrix = pd.crosstab(spells_to_analyze['deck_id'], spells_to_analyze['name']) > 0
+                frequent_itemsets = apriori(deck_card_matrix, min_support=packages_support_slider, use_colnames=True)
+                if frequent_itemsets.empty: st.warning("No packages found. Try lowering 'Min Support %'.")
+                else:
+                    frequent_itemsets['length'] = frequent_itemsets['itemsets'].apply(len)
+                    result = frequent_itemsets[frequent_itemsets['length'] >= 2].sort_values(['length', 'support'], ascending=False)
+                    st.write(f"Found {len(result)} Synergy Packages:")
+                    st.dataframe(result)
 
 else:
     st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
