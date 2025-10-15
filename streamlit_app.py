@@ -77,8 +77,8 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     progress_bar = st.progress(0)
     
     with sync_playwright() as p:
-        # FIX: Add args for compatibility with Streamlit Cloud's sandboxed environment
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        # FIX: Switch to Firefox which can be more stable in cloud environments
+        browser = p.firefox.launch(headless=True)
         page = browser.new_page()
         for i, row in sample_df.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
@@ -148,12 +148,14 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
     """Helper function to run the slot-filling algorithm."""
     decklist, used_cards = list(initial_decklist), set(initial_decklist)
     
-    initial_df = candidates_df[candidates_df['name'].isin(initial_decklist)]
+    # Pre-populate current counts from initial decklist
+    initial_df = candidates_df[candidates_df['name'].isin(initial_decklist)].drop_duplicates(subset=['name'])
     for _, card in initial_df.iterrows():
         if card['type'] in constraints['types']: constraints['types'][card['type']]['current'] += 1
         if isinstance(card.get('category_list'), list):
             for func in card['category_list']:
-                if func in constraints['functions']: constraints['functions'][func]['current'] += 1
+                if func in constraints['functions']: 
+                    constraints['functions'][func]['current'] += 1
 
     for _, card in candidates_df.iterrows():
         if len(decklist) >= 100 or card['name'] in used_cards: continue
@@ -290,16 +292,59 @@ if df_raw is not None:
 
         st.subheader("Generate a Deck Template")
         if FUNCTIONAL_ANALYSIS_ENABLED:
-            # RESTORED: Full template generator implementation is here
-            template_must_haves = st.text_area("Add must-include cards (one per line):", key="template_must_haves")
-            
-            func_categories_list = sorted([cat for cat in df.explode('category')['category'].unique() if cat != 'Uncategorized'])
-            type_categories_list = sorted(df['type'].unique())
-            
-            # ... (UI for constraints will be generated dynamically)
-            
-            if st.button("📋 Generate Deck With Constraints"):
-                st.info("Deck template generator logic would be executed here.")
+            with st.form(key='template_form'):
+                st.write("Define your deck structure with the constraints below.")
+                template_must_haves = st.text_area("Must-Include Cards (one per line):", key="template_must_haves")
+                
+                func_categories_list = sorted([cat for cat in df.explode('category')['category'].unique() if cat != 'Uncategorized'])
+                type_categories_list = sorted(df['type'].unique())
+                
+                constraints = {'functions': {}, 'types': {}}
+                
+                with st.expander("Functional Constraints", expanded=True):
+                    for cat in func_categories_list:
+                        col1, col2 = st.columns([1, 3])
+                        is_enabled = col1.checkbox(cat, value=True, key=f"check_{cat}")
+                        if is_enabled:
+                            min_val, max_val = col2.slider("", 0, 40, (8, 12) if cat in ['Ramp', 'Card Draw'] else (0, 10), key=f"slider_{cat}")
+                            constraints['functions'][cat] = {'target': [min_val, max_val], 'current': 0}
+
+                with st.expander("Card Type Constraints"):
+                     for cat in type_categories_list:
+                        col1, col2 = st.columns([1, 3])
+                        is_enabled = col1.checkbox(cat, value=False, key=f"check_type_{cat}")
+                        if is_enabled:
+                            min_val, max_val = col2.slider("", 0, 60, (30, 40) if cat == 'Creature' else (0, 20), key=f"slider_type_{cat}")
+                            constraints['types'][cat] = {'target': [min_val, max_val], 'current': 0}
+                
+                submitted = st.form_submit_button("📋 Generate Deck With Constraints")
+
+                if submitted:
+                    with st.spinner("Generating decklists..."):
+                        must_haves = parse_decklist(template_must_haves)
+                        
+                        base_candidates = df.drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name')
+                        base_candidates = base_candidates[~base_candidates['name'].isin(must_haves)]
+                        base_candidates['category_list'] = base_candidates['category'].str.split('|')
+                        
+                        candidates_pop = base_candidates.sort_values('count', ascending=False)
+                        
+                        candidates_eff = base_candidates.copy()
+                        median_cmc = candidates_eff['cmc'].median()
+                        candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc'].fillna(median_cmc) + 1)
+                        candidates_eff = candidates_eff.sort_values('efficiency_score', ascending=False)
+
+                        pop_deck, _ = _fill_deck_slots(candidates_pop, deepcopy(constraints), initial_decklist=must_haves)
+                        eff_deck, _ = _fill_deck_slots(candidates_eff, deepcopy(constraints), initial_decklist=must_haves)
+
+                        pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
+                        eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
+                        
+                        t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
+                        with t1:
+                            st.dataframe(pop_df)
+                        with t2:
+                            st.dataframe(eff_df)
         else:
             st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
 
