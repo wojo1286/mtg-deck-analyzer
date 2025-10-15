@@ -26,7 +26,7 @@ from sklearn.manifold import TSNE
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
 
 # ===================================================================
-# 2. DATA SCRAPING FUNCTIONS (from edhrec_scraper.py)
+# 2. DATA SCRAPING & PROCESSING FUNCTIONS (Cached for performance)
 # ===================================================================
 
 def parse_table(html, deck_id, deck_source):
@@ -37,48 +37,29 @@ def parse_table(html, deck_id, deck_source):
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
             if len(tds) < 6: continue
-            
             cmc_el = tr.find("span", class_="float-right")
             cmc = cmc_el.get_text(strip=True) if cmc_el else None
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
-            
-            ctype = None
-            for td in tds:
-                text = td.get_text(strip=True)
-                if text in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land"]:
-                    ctype = text; break
-            
-            price = None
-            for td in reversed(tds):
-                txt = td.get_text(strip=True)
-                if txt.startswith("$"):
-                    price = txt; break
-
+            ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]), None)
+            price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
             if name:
                 cards.append({"deck_id": deck_id, "deck_source": deck_source, "cmc": cmc, "name": name, "type": ctype, "price": price})
     return cards
 
 def run_scraper(commander_slug, deck_limit):
-    """
-    Main function to scrape decklists for a given commander from EDHREC.
-    Shows progress in the Streamlit UI.
-    """
+    """Main function to scrape decklists for a given commander from EDHREC."""
     st.info(f"🔍 Fetching deck metadata for '{commander_slug}'...")
     json_url = f"https://json.edhrec.com/pages/decks/{commander_slug}/optimized.json"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(json_url, headers=headers)
-        r.raise_for_status()
-        data = r.json()
+        r = requests.get(json_url, headers=headers); r.raise_for_status(); data = r.json()
     except requests.RequestException as e:
-        st.error(f"Failed to fetch metadata from EDHREC. Error: {e}")
-        return None
+        st.error(f"Failed to fetch metadata from EDHREC. Error: {e}"); return None
 
     decks = data.get("table", [])
     if not decks:
-        st.error(f"No decks found for '{commander_slug}'. Please check the commander name.")
-        return None
+        st.error(f"No decks found for '{commander_slug}'. Please check the slug."); return None
 
     df_meta = pd.json_normalize(decks)
     df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https://edhrec.com/deckpreview/{x}")
@@ -92,164 +73,208 @@ def run_scraper(commander_slug, deck_limit):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         for i, row in sample_df.iterrows():
-            deck_id = row["urlhash"]
-            deck_url = row["deckpreview_url"]
+            deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
             status_text = st.empty()
             status_text.text(f"[{i+1}/{len(sample_df)}] Fetching {deck_url}")
-
             try:
                 page.goto(deck_url, timeout=90000)
                 page.wait_for_selector('button.nav-link[aria-controls*="table"]', timeout=15000)
                 page.click('button.nav-link[aria-controls*="table"]')
                 page.wait_for_selector("table", timeout=20000)
-                
                 html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
-                
                 cards = parse_table(html, deck_id, deck_source)
-                if cards:
-                    all_cards.extend(cards)
-                
-                time.sleep(random.uniform(1.0, 2.5)) # Be polite to the server
+                if cards: all_cards.extend(cards)
+                time.sleep(random.uniform(1.0, 2.5))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
-                time.sleep(1) # Pause on error
-            
             progress_bar.progress((i + 1) / len(sample_df))
         browser.close()
     
-    if not all_cards:
-        st.error("Scraping complete, but no cards were successfully parsed.")
-        return None
-        
-    final_df = pd.DataFrame(all_cards)
-    st.success("✅ Scraping complete!")
-    return final_df
+    if not all_cards: st.error("Scraping complete, but no cards were parsed."); return None
+    st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards)
 
-# ===================================================================
-# 3. DATA PROCESSING & ANALYSIS FUNCTIONS (from Colab notebook)
-# ===================================================================
 @st.cache_data
-def clean_data(df, categories_df=None):
+def clean_and_prepare_data(df, categories_df=None):
     """Applies cleaning, categorization, and pre-calculation to the raw DataFrame."""
     dfc = df.copy()
-    dfc['price_clean'] = (dfc.get('price', pd.Series(dtype='str'))
-                         .astype(str).str.replace(r'[$,]', '', regex=True)
-                         .replace({'': np.nan}).astype(float))
-    dfc['cmc'] = pd.to_numeric(dfc.get('cmc', np.nan), errors='coerce')
+    dfc['price_clean'] = pd.to_numeric(dfc.get('price', '').astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce')
+    dfc['cmc'] = pd.to_numeric(dfc.get('cmc'), errors='coerce')
     dfc['type'] = dfc.get('type', 'Unknown').fillna('Unknown')
     
     functional_analysis_enabled = False
-    if categories_df is not None:
+    if categories_df is not None and not categories_df.empty:
         dfc = pd.merge(dfc, categories_df, on='name', how='left')
         dfc['category'] = dfc['category'].fillna('Uncategorized')
         functional_analysis_enabled = True
     
-    return dfc, functional_analysis_enabled
+    num_decks = dfc['deck_id'].nunique()
+    pop_all = (dfc.groupby('name').agg(count=('deck_id','nunique')).reset_index().sort_values('count', ascending=False))
+    pop_all['inclusion_rate'] = (pop_all['count'] / num_decks) * 100
+    
+    return dfc, functional_analysis_enabled, num_decks, pop_all
 
-# ... (All other analysis functions like popularity_table, apply_filters, etc. would go here) ...
-# For brevity, these are assumed to exist and are the same as in the Colab notebook.
-# Let's define a placeholder for one of them.
 def popularity_table(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty: return pd.DataFrame(columns=['name', 'count', 'avg_price', 'avg_cmc', 'type'])
     return (frame.groupby('name')
             .agg(count=('deck_id','nunique'), avg_price=('price_clean','mean'), avg_cmc=('cmc','mean'), type=('type','first'))
             .reset_index().sort_values('count', ascending=False))
 
+def parse_decklist(text: str) -> list:
+    lines = text.strip().split('\n')
+    return [re.sub(r'^\d+\s*x?\s*', '', line).strip() for line in lines if line.strip()]
+
+def build_cococcurrence(source_df: pd.DataFrame, topN: int, exclude_staples_n: int, pop_all_df: pd.DataFrame) -> pd.DataFrame:
+    working_df = source_df.copy()
+    if exclude_staples_n > 0:
+        staples_to_exclude = pop_all_df['name'].head(exclude_staples_n).tolist()
+        working_df = working_df[~working_df['name'].isin(staples_to_exclude)]
+    top_cards = working_df['name'].value_counts().head(topN).index
+    f = working_df[working_df['name'].isin(top_cards)]
+    if f.empty or 'deck_id' not in f: return pd.DataFrame()
+    pivot = pd.crosstab(f['deck_id'], f['name']).reindex(columns=top_cards, fill_value=0)
+    return pivot.T.dot(pivot)
+
+def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
+    """Helper function to run the slot-filling algorithm."""
+    decklist, used_cards = list(initial_decklist), set(initial_decklist)
+    for _, card in candidates_df.iterrows():
+        if len(decklist) >= 100 or card['name'] in used_cards: continue
+        can_add = True
+        card_type = card['type']
+        if card_type in constraints['types'] and constraints['types'][card_type]['current'] >= constraints['types'][card_type]['target'][1]: can_add = False
+        if can_add and isinstance(card.get('category_list'), list):
+            for func in card['category_list']:
+                if func in constraints['functions'] and constraints['functions'][func]['current'] >= constraints['functions'][func]['target'][1]: can_add = False; break
+        if can_add:
+            decklist.append(card['name']); used_cards.add(card['name'])
+            if card_type in constraints['types']: constraints['types'][card_type]['current'] += 1
+            if isinstance(card.get('category_list'), list):
+                best_func, max_need = '', -1
+                for func in card['category_list']:
+                    if func in constraints['functions']:
+                       need = constraints['functions'][func]['target'][1] - constraints['functions'][func]['current']
+                       if need > max_need: max_need = need; best_func = func
+                if best_func: constraints['functions'][best_func]['current'] += 1
+    remaining = 100 - len(decklist)
+    if remaining > 0:
+        fillers = candidates_df[~candidates_df['name'].isin(used_cards)].head(remaining)
+        decklist.extend(fillers['name'].tolist())
+    return decklist, constraints
+
 # ===================================================================
-# 4. STREAMLIT UI LAYOUT
+# 4. STREAMLIT UI & APP LOGIC
 # ===================================================================
 st.title("MTG Deckbuilding Analysis Tool")
 
-# --- Sidebar for Controls & Data Loading ---
+# --- Sidebar for Data Source ---
 st.sidebar.header("Data Source")
-data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"))
+# ... (Data source logic remains the same as previous version) ...
 
-df = None
+df_raw = None
 categories_df = None
-
-if 'scraped_df' not in st.session_state:
-    st.session_state['scraped_df'] = None
+if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
+data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
 
 if data_source_option == "Upload CSV":
     decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
     categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
     if decklist_file:
-        df = pd.read_csv(decklist_file)
-        if categories_file:
-            categories_df = pd.read_csv(categories_file)
+        df_raw = pd.read_csv(decklist_file)
+        if categories_file: categories_df = pd.read_csv(categories_file)
 elif data_source_option == "Scrape New Data":
-    commander_slug = st.sidebar.text_input("Enter Commander Slug (e.g., ojer-axonil-deepest-might)", "ojer-axonil-deepest-might")
+    commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
     deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 500, 150)
     if st.sidebar.button("🚀 Start Scraping"):
         with st.spinner("Scraping in progress... this may take several minutes."):
-            scraped_data = run_scraper(commander_slug, deck_limit)
-            st.session_state['scraped_df'] = scraped_data
-    
-    if st.session_state['scraped_df'] is not None:
-        df = st.session_state['scraped_df']
-        st.sidebar.success("Scraped data is loaded and ready for analysis.")
-        # Allow uploading categories for scraped data
+            st.session_state.scraped_df = run_scraper(commander_slug, deck_limit)
+    if st.session_state.scraped_df is not None:
+        df_raw = st.session_state.scraped_df
+        st.sidebar.success("Scraped data is loaded.")
         categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
-        if categories_file:
-            categories_df = pd.read_csv(categories_file)
+        if categories_file: categories_df = pd.read_csv(categories_file)
 
+# --- Main App Logic ---
+if df_raw is not None:
+    df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df)
+    st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
-# --- Main Application Logic ---
-if df is not None:
-    # Clean the loaded data
-    df, FUNCTIONAL_ANALYSIS_ENABLED = clean_data(df, categories_df)
-    
-    st.success(f"Data loaded with {df['deck_id'].nunique()} unique decks. Ready for analysis.")
-    
-    # Pre-calculate global stats for the loaded data
-    num_decks = df['deck_id'].nunique()
-    pop_all = popularity_table(df)
-    pop_all['inclusion_rate'] = (pop_all['count'] / num_decks) * 100
-
-    # --- RENDER THE REST OF THE UI (Ported from Colab) ---
+    # --- Main Dashboard ---
     st.header("Dashboard & Analysis")
-    
-    # Create columns for filters
     col1, col2 = st.columns(2)
     with col1:
         price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
-        main_top_n = st.slider('Top N Staples:', min_value=5, max_value=100, value=25, step=5)
-        exclude_top = st.checkbox('Exclude Top N Staples', value=False)
+        main_top_n = st.slider('Top N Staples:', 5, 100, 25, 5)
+        exclude_top = st.checkbox('Exclude Top N Staples', False)
     with col2:
         unique_types = sorted(df['type'].unique())
         exclude_types = st.multiselect('Exclude Types:', options=unique_types, default=[])
 
-    # Apply filters based on widgets
-    # Note: Streamlit's reactive nature means we don't need a button.
-    # The filtering logic would be applied directly before generating charts.
-    
-    # Placeholder for where the charts would be displayed
-    st.subheader("Top Spells")
-    
-    # Create a filtered dataframe based on user input
-    filtered_df = df.copy() # Start with the full dataframe
-    if price_cap > 0:
-        filtered_df = filtered_df[filtered_df['price_clean'] <= price_cap]
-    if exclude_top:
-        top_names = pop_all['name'].head(main_top_n).tolist()
-        filtered_df = filtered_df[~filtered_df['name'].isin(top_names)]
-    if exclude_types:
-        filtered_df = filtered_df[~filtered_df['type'].isin(exclude_types)]
-    
-    spells_df = filtered_df[~filtered_df['type'].str.contains('Land', na=False)]
-    pop_spells = popularity_table(spells_df)
-    
-    if not pop_spells.empty:
-        fig1 = px.bar(pop_spells.head(25), y='name', x='count', orientation='h', title=f'Top {min(25, len(pop_spells))} Spells')
-        fig1.update_layout(yaxis=dict(autorange='reversed'))
-        st.plotly_chart(fig1, use_container_width=True)
-    else:
-        st.warning("No spells match the current filter criteria.")
+    filtered_df = df.copy()
+    if price_cap > 0: filtered_df = filtered_df[filtered_df['price_clean'] <= price_cap]
+    if exclude_top: filtered_df = filtered_df[~filtered_df['name'].isin(POP_ALL['name'].head(main_top_n).tolist())]
+    if exclude_types: filtered_df = filtered_df[~filtered_df['type'].isin(exclude_types)]
 
-    # ... All other tools (Deck Analyzer, Template Generator, Synergy Map, etc.) would be ported here
-    # using st.text_area, st.button, st.tabs, etc.
-    
+    spells_df = filtered_df[~filtered_df['type'].str.contains('Land', na=False)]
+    lands_df = filtered_df[filtered_df['type'].str.contains('Land', na=False)]
+
+    # --- Display Charts ---
+    st.subheader("Top Spells, Lands & Curves")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pop_spells = popularity_table(spells_df)
+        if not pop_spells.empty:
+            fig1 = px.bar(pop_spells.head(25), y='name', x='count', orientation='h', title=f'Top {min(25, len(pop_spells))} Spells')
+            fig1.update_layout(yaxis=dict(autorange='reversed'), height=600); st.plotly_chart(fig1, use_container_width=True)
+    with c2:
+        pop_lands = popularity_table(lands_df)
+        if not pop_lands.empty:
+            fig_lands = px.bar(pop_lands.head(25), y='name', x='count', orientation='h', title='Top 25 Lands')
+            fig_lands.update_layout(yaxis=dict(autorange='reversed'), height=600); st.plotly_chart(fig_lands, use_container_width=True)
+    with c3:
+        curve = spells_df.groupby('cmc').size().reset_index(name='count')
+        fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
+
+    if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
+        with st.expander("Functional Analysis"):
+            func_df = spells_df.copy()
+            func_df['category_list'] = func_df['category'].str.split('|')
+            func_df = func_df.explode('category_list').loc[lambda d: d['category_list'] != 'Uncategorized']
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                sunburst_fig = px.sunburst(func_df, path=['category_list'], title='Functional Breakdown'); st.plotly_chart(sunburst_fig, use_container_width=True)
+            with fc2:
+                box_fig = px.box(func_df, x='category_list', y='cmc', title='CMC Distribution by Function'); st.plotly_chart(box_fig, use_container_width=True)
+
+    # --- Personal Deckbuilding Tools Expander ---
+    with st.expander("Personal Deckbuilding Tools", expanded=True):
+        st.subheader("Analyze Your Decklist")
+        decklist_input = st.text_area("Paste your decklist here:", height=200, key="deck_analyzer_input")
+        if st.button("🔍 Analyze My Deck"):
+            user_decklist = parse_decklist(decklist_input)
+            if user_decklist:
+                st.write(f"Analyzing {len(user_decklist)} cards...")
+                staples = POP_ALL[POP_ALL['inclusion_rate'] >= 75]
+                missing_staples = staples[~staples['name'].isin(user_decklist)]
+                st.write("Popular Staples Missing From Your Deck (>75% inclusion):")
+                st.dataframe(missing_staples[['name', 'inclusion_rate']].round(1))
+            else:
+                st.warning("Please paste a decklist to analyze.")
+
+        st.subheader("Generate a Deck Template")
+        if FUNCTIONAL_ANALYSIS_ENABLED:
+            template_must_haves = st.text_area("Add must-include cards (one per line):", key="template_must_haves")
+            # ... (Full template generator UI and logic would go here)
+            if st.button("📋 Generate Deck With Constraints"):
+                st.info("Deck template generator logic would be executed here.")
+        else:
+            st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
+
+    # --- Advanced Synergy Tools Expander ---
+    with st.expander("Advanced Synergy Tools", expanded=False):
+        # ... (Full implementation for Card Inspector, Synergy Map, Heatmap, and Packages)
+        st.info("All advanced synergy tools would be fully implemented here.")
+
 else:
     st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
