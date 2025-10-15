@@ -1,3 +1,5 @@
+# .streamlit/config.toml
+
 [server]
 runOnSave = true
 headless = true
@@ -10,43 +12,3 @@ showErrorDetails = true
 
 [runner]
 postRunCommand = ["/bin/bash", "setup.sh"]
-```
-
-#### 2. Verify `setup.sh`
-
-This script contains the commands to be executed, most importantly the Playwright installer.
-
-* **Filepath:** `setup.sh`
-* **Content:**
-
-```sh
-#!/bin/bash
-
-# This command installs the browser that Playwright needs
-playwright install chromium
-```
-
-#### 3. Verify `packages.txt`
-
-This file ensures all the underlying system libraries for Chromium are installed by the server's operating system.
-
-* **Filepath:** `packages.txt`
-* **Content:**
-
-```
-libnss3
-libnspr4
-libatk1.0-0
-libatk-bridge2.0-0
-libcups2
-libdbus-1-3
-libdrm2
-libgbm1
-libxcomposite1
-libxdamage1
-libxfixes3
-libxrandr2
-libxshmfence1
-libatspi2.0-0
-libxkbcommon0
-libgtk-3-0
