@@ -217,8 +217,9 @@ if df_raw is not None:
         unique_types = sorted(df['type'].unique())
         exclude_types = st.multiselect('Exclude Types:', options=unique_types, default=[])
 
+    # This filtered_df is now the source of truth for all downstream analysis
     filtered_df = df.copy()
-    if price_cap > 0: filtered_df = filtered_df[filtered_df['price_clean'] <= price_cap]
+    if price_cap > 0: filtered_df = filtered_df[(filtered_df['price_clean'].isna()) | (filtered_df['price_clean'] <= price_cap)]
     if exclude_top: filtered_df = filtered_df[~filtered_df['name'].isin(POP_ALL['name'].head(main_top_n).tolist())]
     if exclude_types: filtered_df = filtered_df[~filtered_df['type'].isin(exclude_types)]
 
@@ -268,7 +269,7 @@ if df_raw is not None:
 
         st.subheader("Generate a Deck Template")
         if FUNCTIONAL_ANALYSIS_ENABLED:
-            # ... (Full template generator implementation)
+            # Full template generator implementation
             st.info("Deck template generator UI and logic will be fully implemented in the final version.")
         else:
             st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
@@ -279,8 +280,9 @@ if df_raw is not None:
         if all_spells_list:
             selected_card = st.selectbox("Select a card to inspect:", all_spells_list)
             if selected_card:
-                decks_with_card = df[df['name'] == selected_card]['deck_id'].unique()
-                synergy_df = df[df['deck_id'].isin(decks_with_card)]
+                # FIX: Use filtered_df for context
+                decks_with_card = filtered_df[filtered_df['name'] == selected_card]['deck_id'].unique()
+                synergy_df = filtered_df[filtered_df['deck_id'].isin(decks_with_card)]
                 synergy_pop = popularity_table(synergy_df)
                 synergy_pop = synergy_pop[synergy_pop['name'] != selected_card]
                 st.write(f"Top 20 cards played with '{selected_card}':")
@@ -289,6 +291,7 @@ if df_raw is not None:
         st.subheader("Synergy Map")
         if st.button("🗺️ Create Synergy Map"):
             with st.spinner("Generating Synergy Map..."):
+                # Uses spells_df which is already filtered
                 deck_card_matrix = pd.crosstab(spells_df['deck_id'], spells_df['name'])
                 tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(deck_card_matrix.columns)-1), max_iter=1000)
                 embedding = tsne.fit_transform(deck_card_matrix.T)
@@ -301,12 +304,13 @@ if df_raw is not None:
         st.subheader("Synergy Heatmap")
         h_col1, h_col2 = st.columns(2)
         with h_col1:
-            heatmap_top_n = st.slider('Top N for Heatmap:', 10, 50, 25, 5)
+            heatmap_top_n = st.slider('Top N for Heatmap:', 10, 50, 25, 5, key="heatmap_top_n")
         with h_col2:
-            heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1)
+            heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1, key="heatmap_exclude_n")
         if st.button("🔥 Build Heatmap"):
              with st.spinner("Building Heatmap..."):
-                co = build_cococcurrence(df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
+                # FIX: Use filtered_df for context
+                co = build_cococcurrence(filtered_df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
                 if co.empty: st.warning("Co-occurrence matrix is empty.")
                 else:
                     title = f'Card Co-occurrence (Top {heatmap_top_n}, excluding {heatmap_exclude_n})'
@@ -319,6 +323,7 @@ if df_raw is not None:
         packages_support_slider = st.slider('Min Support %:', 0.1, 0.7, 0.3, 0.05)
         if st.button("📦 Find Synergy Packages"):
             with st.spinner("Finding packages..."):
+                # Uses spells_df which is already filtered
                 spells_to_analyze = spells_df[~spells_df['name'].isin(packages_exclude_staples)]
                 deck_card_matrix = pd.crosstab(spells_to_analyze['deck_id'], spells_to_analyze['name']) > 0
                 frequent_itemsets = apriori(deck_card_matrix, min_support=packages_support_slider, use_colnames=True)
