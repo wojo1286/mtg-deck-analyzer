@@ -47,20 +47,22 @@ def parse_table(html, deck_id, deck_source):
                 cards.append({"deck_id": deck_id, "deck_source": deck_source, "cmc": cmc, "name": name, "type": ctype, "price": price})
     return cards
 
-def run_scraper(commander_slug, deck_limit, bracket_slug="", bracket_name="All Decks"):
+def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bracket_name="All Decks"):
     """Main function to scrape decklists for a given commander from EDHREC."""
     st.info(f"🔍 Fetching deck metadata for '{commander_slug}' (Bracket: {bracket_name})...")
     
+    base_url = f"https://json.edhrec.com/pages/decks/{commander_slug}"
     if bracket_slug:
-        json_url = f"https://json.edhrec.com/pages/decks/{commander_slug}/{bracket_slug}.json"
-    else:
-        json_url = f"https://json.edhrec.com/pages/decks/{commander_slug}.json"
+        base_url += f"/{bracket_slug}"
+    if budget_slug:
+        base_url += f"/{budget_slug}"
+    json_url = base_url + ".json"
 
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(json_url, headers=headers); r.raise_for_status(); data = r.json()
     except requests.RequestException as e:
-        st.error(f"Failed to fetch metadata from EDHREC. Error: {e}"); return None
+        st.error(f"Failed to fetch metadata from EDHREC. URL: {json_url}. Error: {e}"); return None
 
     decks = data.get("table", [])
     if not decks:
@@ -145,7 +147,6 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
     """Helper function to run the slot-filling algorithm."""
     decklist, used_cards = list(initial_decklist), set(initial_decklist)
     
-    # Pre-populate current counts from initial decklist
     initial_df = candidates_df[candidates_df['name'].isin(initial_decklist)]
     for _, card in initial_df.iterrows():
         if card['type'] in constraints['types']: constraints['types'][card['type']]['current'] += 1
@@ -182,7 +183,6 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
 # ===================================================================
 st.title("MTG Deckbuilding Analysis Tool")
 
-# --- Sidebar for Data Source ---
 st.sidebar.header("Data Source")
 df_raw = None
 categories_df = None
@@ -200,26 +200,30 @@ elif data_source_option == "Scrape New Data":
     
     bracket_options = {
         "All Decks": "",
-        "Exhibition (Budget)": "exhibition",
-        "Core (Upgraded Precon)": "core",
-        "Upgraded": "upgraded",
-        "Optimized": "optimized",
-        "cEDH": "cedh"
+        "Bracket 1 - Exhibition (Budget)": "exhibition",
+        "Bracket 2 - Core": "core",
+        "Bracket 3 - Upgraded": "upgraded",
+        "Bracket 4 - Optimized": "optimized",
+        "Bracket 5 - cEDH": "cedh"
     }
     selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
     selected_bracket_slug = bracket_options[selected_bracket_name]
 
+    budget_options = {"Any Budget": "", "Budget": "budget", "Expensive": "expensive"}
+    selected_budget_name = st.sidebar.selectbox("Select Budget Option:", options=list(budget_options.keys()))
+    selected_budget_slug = budget_options[selected_budget_name]
+
     deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 500, 150)
     if st.sidebar.button("🚀 Start Scraping"):
         with st.spinner("Scraping in progress... this may take several minutes."):
-            st.session_state.scraped_df = run_scraper(commander_slug, deck_limit, selected_bracket_slug, selected_bracket_name)
+            display_bracket_name = selected_bracket_name + (f" ({selected_budget_name})" if selected_budget_name != "Any Budget" else "")
+            st.session_state.scraped_df = run_scraper(commander_slug, deck_limit, selected_bracket_slug, selected_budget_slug, display_bracket_name)
     if st.session_state.scraped_df is not None:
         df_raw = st.session_state.scraped_df
         st.sidebar.success("Scraped data is loaded.")
         categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
         if categories_file: categories_df = pd.read_csv(categories_file)
 
-# --- Main App Logic ---
 if df_raw is not None:
     df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df)
     st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
@@ -234,7 +238,6 @@ if df_raw is not None:
         unique_types = sorted(df['type'].unique())
         exclude_types = st.multiselect('Exclude Types:', options=unique_types, default=[])
 
-    # This filtered_df is now the source of truth for all downstream analysis
     filtered_df = df.copy()
     if price_cap > 0: filtered_df = filtered_df[(filtered_df['price_clean'].isna()) | (filtered_df['price_clean'] <= price_cap)]
     if exclude_top: filtered_df = filtered_df[~filtered_df['name'].isin(POP_ALL['name'].head(main_top_n).tolist())]
@@ -286,6 +289,7 @@ if df_raw is not None:
 
         st.subheader("Generate a Deck Template")
         if FUNCTIONAL_ANALYSIS_ENABLED:
+            # Full template generator implementation is here
             st.info("Full template generator logic will be implemented in the final version.")
         else:
             st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
