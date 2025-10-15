@@ -6,5 +6,4 @@ port = $PORT\n\
 enableCORS = false\n\
 " > ~/.streamlit/config.toml
 
-# This is the command that installs the browser
 playwright install chromium
