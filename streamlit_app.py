@@ -47,10 +47,15 @@ def parse_table(html, deck_id, deck_source):
                 cards.append({"deck_id": deck_id, "deck_source": deck_source, "cmc": cmc, "name": name, "type": ctype, "price": price})
     return cards
 
-def run_scraper(commander_slug, deck_limit):
+def run_scraper(commander_slug, deck_limit, bracket_slug="", bracket_name="All Decks"):
     """Main function to scrape decklists for a given commander from EDHREC."""
-    st.info(f"🔍 Fetching deck metadata for '{commander_slug}'...")
-    json_url = f"https://json.edhrec.com/pages/decks/{commander_slug}/optimized.json"
+    st.info(f"🔍 Fetching deck metadata for '{commander_slug}' (Bracket: {bracket_name})...")
+    
+    if bracket_slug:
+        json_url = f"https://json.edhrec.com/pages/decks/{commander_slug}/{bracket_slug}.json"
+    else:
+        json_url = f"https://json.edhrec.com/pages/decks/{commander_slug}.json"
+
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(json_url, headers=headers); r.raise_for_status(); data = r.json()
@@ -59,12 +64,12 @@ def run_scraper(commander_slug, deck_limit):
 
     decks = data.get("table", [])
     if not decks:
-        st.error(f"No decks found for '{commander_slug}'. Please check the slug."); return None
+        st.error(f"No decks found for '{commander_slug}' in the '{bracket_name}' bracket. Please check the slug and bracket."); return None
 
     df_meta = pd.json_normalize(decks)
     df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https://edhrec.com/deckpreview/{x}")
     sample_df = df_meta.head(deck_limit)
-    st.success(f"Found {len(decks)} total decks. Scraping the first {len(sample_df)}.")
+    st.success(f"Found {len(decks)} total decks in bracket. Scraping the first {len(sample_df)}.")
 
     all_cards = []
     progress_bar = st.progress(0)
@@ -192,10 +197,22 @@ if data_source_option == "Upload CSV":
         if categories_file: categories_df = pd.read_csv(categories_file)
 elif data_source_option == "Scrape New Data":
     commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
+    
+    bracket_options = {
+        "All Decks": "",
+        "Exhibition (Budget)": "exhibition",
+        "Core (Upgraded Precon)": "core",
+        "Upgraded": "upgraded",
+        "Optimized": "optimized",
+        "cEDH": "cedh"
+    }
+    selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
+    selected_bracket_slug = bracket_options[selected_bracket_name]
+
     deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 500, 150)
     if st.sidebar.button("🚀 Start Scraping"):
         with st.spinner("Scraping in progress... this may take several minutes."):
-            st.session_state.scraped_df = run_scraper(commander_slug, deck_limit)
+            st.session_state.scraped_df = run_scraper(commander_slug, deck_limit, selected_bracket_slug, selected_bracket_name)
     if st.session_state.scraped_df is not None:
         df_raw = st.session_state.scraped_df
         st.sidebar.success("Scraped data is loaded.")
@@ -269,8 +286,7 @@ if df_raw is not None:
 
         st.subheader("Generate a Deck Template")
         if FUNCTIONAL_ANALYSIS_ENABLED:
-            # Full template generator implementation
-            st.info("Deck template generator UI and logic will be fully implemented in the final version.")
+            st.info("Full template generator logic will be implemented in the final version.")
         else:
             st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
 
@@ -280,7 +296,6 @@ if df_raw is not None:
         if all_spells_list:
             selected_card = st.selectbox("Select a card to inspect:", all_spells_list)
             if selected_card:
-                # FIX: Use filtered_df for context
                 decks_with_card = filtered_df[filtered_df['name'] == selected_card]['deck_id'].unique()
                 synergy_df = filtered_df[filtered_df['deck_id'].isin(decks_with_card)]
                 synergy_pop = popularity_table(synergy_df)
@@ -291,7 +306,6 @@ if df_raw is not None:
         st.subheader("Synergy Map")
         if st.button("🗺️ Create Synergy Map"):
             with st.spinner("Generating Synergy Map..."):
-                # Uses spells_df which is already filtered
                 deck_card_matrix = pd.crosstab(spells_df['deck_id'], spells_df['name'])
                 tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(deck_card_matrix.columns)-1), max_iter=1000)
                 embedding = tsne.fit_transform(deck_card_matrix.T)
@@ -309,7 +323,6 @@ if df_raw is not None:
             heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1, key="heatmap_exclude_n")
         if st.button("🔥 Build Heatmap"):
              with st.spinner("Building Heatmap..."):
-                # FIX: Use filtered_df for context
                 co = build_cococcurrence(filtered_df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
                 if co.empty: st.warning("Co-occurrence matrix is empty.")
                 else:
@@ -323,7 +336,6 @@ if df_raw is not None:
         packages_support_slider = st.slider('Min Support %:', 0.1, 0.7, 0.3, 0.05)
         if st.button("📦 Find Synergy Packages"):
             with st.spinner("Finding packages..."):
-                # Uses spells_df which is already filtered
                 spells_to_analyze = spells_df[~spells_df['name'].isin(packages_exclude_staples)]
                 deck_card_matrix = pd.crosstab(spells_to_analyze['deck_id'], spells_to_analyze['name']) > 0
                 frequent_itemsets = apriori(deck_card_matrix, min_support=packages_support_slider, use_colnames=True)
