@@ -77,8 +77,8 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     progress_bar = st.progress(0)
     
     with sync_playwright() as p:
-        # FIX: Switch to Firefox which can be more stable in cloud environments
-        browser = p.firefox.launch(headless=True)
+        # FIX: Revert to Chromium with the necessary arguments for Streamlit Cloud
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         for i, row in sample_df.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
