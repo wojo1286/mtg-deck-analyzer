@@ -84,6 +84,18 @@ def parse_table(html, deck_id, deck_source):
                 })
     return cards
 
+@st.cache_data
+def get_commander_color_identity(commander_slug):
+    """Fetches the commander's color identity from EDHREC's JSON endpoint."""
+    try:
+        url = f"https://json.edhrec.com/pages/commanders/{commander_slug}.json"
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        data = response.json()
+        return data.get("container", {}).get("json_dict", {}).get("card", {}).get("color_identity", [])
+    except (requests.RequestException, KeyError, IndexError):
+        return []
+
 def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bracket_name="All Decks"):
     st.info(f"🔍 Fetching deck metadata for '{commander_slug}' (Bracket: {bracket_name})...")
     
@@ -96,11 +108,15 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     try:
         r = requests.get(json_url, headers=headers); r.raise_for_status(); data = r.json()
     except requests.RequestException as e:
-        st.error(f"Failed to fetch metadata. Error: {e}"); return None
+        st.error(f"Failed to fetch metadata. Error: {e}"); return None, []
+
+    color_identity = data.get("container", {}).get("json_dict", {}).get("card", {}).get("color_identity", [])
+    if not color_identity: color_identity = get_commander_color_identity(commander_slug)
+    st.session_state.commander_colors = color_identity
 
     decks = data.get("table", [])
     if not decks:
-        st.error(f"No decks found for '{commander_slug}' in '{bracket_name}'."); return None
+        st.error(f"No decks found for '{commander_slug}' in '{bracket_name}'."); return None, []
 
     df_meta = pd.json_normalize(decks).head(deck_limit)
     df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https://edhrec.com/deckpreview/{x}")
@@ -140,8 +156,8 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         browser.close()
     
     if not all_cards: 
-        st.error("Scraping complete, but no cards were parsed."); return None
-    st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards)
+        st.error("Scraping complete, but no cards were parsed."); return None, []
+    st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
 
 @st.cache_data
@@ -219,57 +235,66 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
         decklist.extend(fillers['name'].tolist())
     return decklist, constraints
 
-def generate_average_deck(df, commander_slug):
-    """Generates a 100-card decklist based on average card types and popularity."""
+def generate_average_deck(df, commander_slug, color_identity):
     if df.empty:
-        st.warning("Cannot generate average deck: No data available.")
-        return None
+        st.warning("Cannot generate average deck: No data available."); return None
     
-    # 1. Calculate average counts of each type per deck
     type_counts_per_deck = df.groupby(['deck_id', 'type']).size().unstack(fill_value=0)
     avg_type_counts = type_counts_per_deck.mean().round().astype(int)
-
-    # 2. Normalize counts to sum to 99 (for the main deck)
+    
     total_avg_cards = avg_type_counts.sum()
     if total_avg_cards == 0:
-        st.warning("Cannot generate average deck: No card types found.")
-        return None
+        st.warning("Cannot generate average deck: No card types found."); return None
         
     scaled_counts = (avg_type_counts / total_avg_cards * 99).round().astype(int)
-    
-    # Adjust to make sure it's exactly 99
     diff = 99 - scaled_counts.sum()
-    if diff != 0:
-        scaled_counts[scaled_counts.idxmax()] += diff
+    if diff != 0 and not scaled_counts.empty: scaled_counts[scaled_counts.idxmax()] += diff
 
-    # 3. Fill slots with most popular cards
-    decklist = []
-    used_cards = set()
-    
-    # Add commander first
+    decklist, used_cards = [], set()
     commander_name = commander_slug.replace('-', ' ').title()
-    decklist.append(commander_name)
-    used_cards.add(commander_name)
+    decklist.append(commander_name); used_cards.add(commander_name)
     
     for card_type, count in scaled_counts.items():
-        if count <= 0: continue
-        
+        if count <= 0 or card_type == 'Land': continue
         candidates = df[df['type'] == card_type]
         pop_table = popularity_table(candidates)
-        
         top_cards = pop_table[~pop_table['name'].isin(used_cards)].head(count)
         decklist.extend(top_cards['name'].tolist())
         used_cards.update(top_cards['name'].tolist())
+        
+    if 'Land' in scaled_counts and scaled_counts['Land'] > 0:
+        total_lands_needed = scaled_counts['Land']
+        land_candidates = df[df['type'] == 'Land']
+        
+        basic_land_map = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest'}
+        commander_basics = [basic_land_map[c] for c in color_identity if c in basic_land_map]
+        if not commander_basics: commander_basics = ['Wastes'] 
 
-    # If we are short, fill with most popular remaining spells
+        non_basic_lands = land_candidates[~land_candidates['name'].isin(basic_land_map.values())]
+        pop_non_basics = popularity_table(non_basic_lands)
+        
+        avg_non_basics = int(non_basic_lands.groupby('deck_id').size().mean()) if not non_basic_lands.empty else 0
+        num_non_basics_to_add = min(avg_non_basics, total_lands_needed)
+
+        top_non_basics = pop_non_basics[~pop_non_basics['name'].isin(used_cards)].head(num_non_basics_to_add)
+        decklist.extend(top_non_basics['name'].tolist())
+        used_cards.update(top_non_basics['name'].tolist())
+        
+        num_basics_to_add = total_lands_needed - len(top_non_basics)
+        if num_basics_to_add > 0 and commander_basics:
+            basics_per_color = num_basics_to_add // len(commander_basics)
+            remainder = num_basics_to_add % len(commander_basics)
+            for i, land_name in enumerate(commander_basics):
+                count = basics_per_color + (1 if i < remainder else 0)
+                decklist.extend([land_name] * count)
+
     if len(decklist) < 100:
-        remaining_needed = 100 - len(decklist)
+        remaining = 100 - len(decklist)
         all_pop = popularity_table(df)
-        filler_cards = all_pop[~all_pop['name'].isin(used_cards)].head(remaining_needed)
-        decklist.extend(filler_cards['name'].tolist())
+        fillers = all_pop[~all_pop['name'].isin(used_cards)].head(remaining)
+        decklist.extend(fillers['name'].tolist())
 
     return decklist[:100]
-
 
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
@@ -281,25 +306,25 @@ def main():
     df_raw = None
     categories_df = None
     if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
+    if 'commander_colors' not in st.session_state: st.session_state.commander_colors = []
+    
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
 
-    # Capture commander_slug for later use
-    commander_slug_for_avg = "ojer-axonil-deepest-might"
+    commander_slug_for_tools = "ojer-axonil-deepest-might"
 
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
         categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
         if decklist_file:
+            commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
+            st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
             df_raw = pd.read_csv(decklist_file)
             if categories_file: categories_df = pd.read_csv(categories_file)
     elif data_source_option == "Scrape New Data":
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
-        commander_slug_for_avg = commander_slug # Update with user input
+        commander_slug_for_tools = commander_slug
         
-        bracket_options = {
-            "All Decks": "", "Bracket 1 - Exhibition (Budget)": "exhibition", "Bracket 2 - Core": "core",
-            "Bracket 3 - Upgraded": "upgraded", "Bracket 4 - Optimized": "optimized", "Bracket 5 - cEDH": "cedh"
-        }
+        bracket_options = { "All Decks": "", "Bracket 1 - Exhibition (Budget)": "exhibition", "Bracket 2 - Core": "core", "Bracket 3 - Upgraded": "upgraded", "Bracket 4 - Optimized": "optimized", "Bracket 5 - cEDH": "cedh" }
         selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
         selected_bracket_slug = bracket_options[selected_bracket_name]
 
@@ -311,7 +336,10 @@ def main():
         if st.sidebar.button("🚀 Start Scraping"):
             with st.spinner("Scraping in progress... this may take several minutes."):
                 display_bracket_name = selected_bracket_name + (f" ({selected_budget_name})" if selected_budget_name != "Any Budget" else "")
-                st.session_state.scraped_df = run_scraper(commander_slug, deck_limit, selected_bracket_slug, selected_budget_slug, display_bracket_name)
+                df_scraped, colors = run_scraper(commander_slug, deck_limit, selected_bracket_slug, selected_budget_slug, display_bracket_name)
+                st.session_state.scraped_df = df_scraped
+                st.session_state.commander_colors = colors
+
         if st.session_state.scraped_df is not None:
             df_raw = st.session_state.scraped_df
             st.sidebar.success("Scraped data is loaded.")
@@ -382,10 +410,16 @@ def main():
                     st.warning("Please paste a decklist to analyze.")
 
             st.subheader("Generate Average Deck")
+            deck_prices = df.groupby('deck_id')['price_clean'].sum()
+            min_p, max_p = float(deck_prices.min()), float(deck_prices.max())
+            price_range = st.slider("Filter decks by Total Price for Average Deck:", min_value=min_p, max_value=max_p, value=(min_p, max_p))
             if st.button("📊 Generate Average Deck"):
                 with st.spinner("Generating average deck..."):
-                    avg_deck = generate_average_deck(df, commander_slug_for_avg)
+                    decks_in_range = deck_prices[(deck_prices >= price_range[0]) & (deck_prices <= price_range[1])].index
+                    filtered_price_df = df[df['deck_id'].isin(decks_in_range)]
+                    avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.commander_colors)
                     if avg_deck:
+                        st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.commander_colors) if st.session_state.commander_colors else 'None'}")
                         st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
 
             st.subheader("Generate a Deck Template")
