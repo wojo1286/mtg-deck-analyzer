@@ -1,68 +1,74 @@
+# ===================================================================
+# 1. SETUP & IMPORTS
+# ===================================================================
 import streamlit as st
+import pandas as pd
+import numpy as np
+import os
+import re
+import warnings
+import random
+from copy import deepcopy
+import time
+import requests
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import subprocess
 import sys
-import os
-from playwright.sync_api import sync_playwright
 
-# -------------------------------------------------------------------
-# 1. CACHED INSTALLER FOR PLAYWRIGHT
-# -------------------------------------------------------------------
+# --- Visualization ---
+import plotly.express as px
+import plotly.graph_objects as go
+
+# --- Advanced Analytics ---
+from mlxtend.frequent_patterns import apriori
+from sklearn.manifold import TSNE
+
+# --- Page Config ---
+st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
+
+# ===================================================================
+# 2. PLAYWRIGHT INSTALLATION (RUNS ONCE PER CONTAINER START)
+# ===================================================================
+
 @st.cache_resource
 def setup_playwright():
-    """
-    Ensures that the Playwright Chromium browser and OS-level dependencies
-    are installed within the container at runtime. Only runs once per container.
-    """
+    """Ensures Playwright Chromium is installed without using sudo or --with-deps."""
     st.write("Verifying and (if needed) installing Playwright dependencies...")
-
     try:
-        # Run installation command for Playwright + OS deps
-        command = [
-            sys.executable,
-            "-m",
-            "playwright",
-            "install",
-            "chromium"
-        ]
-
-        with st.spinner("Installing Chromium browser (this only runs on first boot)..."):
+        command = [sys.executable, "-m", "playwright", "install", "chromium"]
+        with st.spinner("Installing Chromium browser (first time only)..."):
             process = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=600  # Allow ample time for first-time install
+                timeout=600
             )
-
         st.success("Playwright environment is ready.")
         with st.expander("Show installation logs"):
             st.code(process.stdout)
-
     except subprocess.CalledProcessError as e:
         st.error("Failed to install Playwright dependencies. The application cannot continue.")
         st.error(f"Error: {e}")
         st.code(e.stderr if hasattr(e, 'stderr') else "No stderr output.")
         st.stop()
-
-    except subprocess.TimeoutExpired:
-        st.error("Playwright installation timed out. Please try again or check your connection.")
-        st.stop()
-
     return True
 
+setup_complete = setup_playwright()
 
-# -------------------------------------------------------------------
-# 2. SIMPLE TEST CASE (REPLACE THIS WITH YOUR APP LOGIC)
-# -------------------------------------------------------------------
+# ===================================================================
+# 3. TEST SCRAPER FOR DEPLOYMENT VERIFICATION
+# ===================================================================
+
 def run_test_scraper():
-    """Minimal test to verify Chromium install and scraping works."""
+    """Test function to verify Playwright + Chromium works in Streamlit Cloud."""
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        except Exception as e:
-            st.warning("First launch failed, trying to reinstall Playwright browser binaries...")
-            subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"], check=False)
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        except Exception:
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
 
         page = browser.new_page()
         page.goto("https://example.com")
@@ -70,22 +76,18 @@ def run_test_scraper():
         st.write("✅ Page loaded successfully. Title:", page.title())
         browser.close()
 
+# ===================================================================
+# 4. STREAMLIT UI
+# ===================================================================
 
-# -------------------------------------------------------------------
-# 3. STREAMLIT UI
-# -------------------------------------------------------------------
 def main():
-    st.set_page_config(layout="centered", page_title="Playwright Test App")
     st.title("Playwright Chromium Test on Streamlit Cloud")
 
     st.write("This app verifies that Playwright can run inside Streamlit Cloud.")
-    if st.button("🚀 Run Test Scrape" ):
+
+    if st.button("🚀 Run Test Scrape"):
         run_test_scraper()
 
-
-# -------------------------------------------------------------------
-# 4. ENTRY POINT
-# -------------------------------------------------------------------
 if __name__ == "__main__":
-    if setup_playwright():
+    if setup_complete:
         main()
