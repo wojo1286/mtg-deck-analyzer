@@ -238,63 +238,78 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
 def generate_average_deck(df, commander_slug, color_identity):
     if df.empty:
         st.warning("Cannot generate average deck: No data available."); return None
-    
-    type_counts_per_deck = df.groupby(['deck_id', 'type']).size().unstack(fill_value=0)
-    avg_type_counts = type_counts_per_deck.mean().round().astype(int)
-    
-    total_avg_cards = avg_type_counts.sum()
-    if total_avg_cards == 0:
-        st.warning("Cannot generate average deck: No card types found."); return None
-        
-    scaled_counts = (avg_type_counts / total_avg_cards * 99).round().astype(int)
-    diff = 99 - scaled_counts.sum()
-    if diff != 0 and not scaled_counts.empty: scaled_counts[scaled_counts.idxmax()] += diff
 
-    decklist, used_cards = [], set()
-    commander_name = commander_slug.replace('-', ' ').title()
-    decklist.append(commander_name); used_cards.add(commander_name)
+    basic_land_names = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']
     
-    for card_type, count in scaled_counts.items():
-        if count <= 0 or card_type == 'Land': continue
+    # Infer basic land count for each deck
+    deck_counts = df.groupby('deck_id').size().reset_index(name='known_cards')
+    deck_counts['inferred_basics'] = 100 - deck_counts['known_cards']
+
+    # Calculate averages
+    spell_df = df[~df['type'].str.contains('Land', na=False)]
+    avg_spell_counts = spell_df.groupby('deck_id')['type'].value_counts().unstack(fill_value=0).mean()
+    
+    non_basic_land_df = df[(df['type'] == 'Land') & (~df['name'].isin(basic_land_names))]
+    avg_non_basic_count = non_basic_land_df.groupby('deck_id').size().mean() if not non_basic_land_df.empty else 0
+    avg_basic_count = deck_counts['inferred_basics'].mean()
+
+    # Combine into a template
+    template = avg_spell_counts.round().astype(int)
+    template['Non-Basic Land'] = round(avg_non_basic_count)
+    template['Basic Land'] = round(avg_basic_count)
+
+    # Normalize to 99 cards
+    total_cards = template.sum()
+    if total_cards == 0:
+        st.warning("Cannot generate average deck: Calculated template is empty."); return None
+    
+    scaled_template = (template / total_cards * 99).round().astype(int)
+    diff = 99 - scaled_template.sum()
+    if diff != 0 and not scaled_template.empty: scaled_template[scaled_template.idxmax()] += diff
+
+    # Fill the decklist
+    commander_name = commander_slug.replace('-', ' ').title()
+    decklist = [commander_name]
+    used_cards = {commander_name}
+
+    # Fill spell slots
+    for card_type, count in scaled_template.items():
+        if count <= 0 or 'Land' in card_type: continue
         candidates = df[df['type'] == card_type]
         pop_table = popularity_table(candidates)
-        top_cards = pop_table[~pop_table['name'].isin(used_cards)].head(count)
+        top_cards = pop_table[~pop_table['name'].isin(used_cards)].head(int(count))
         decklist.extend(top_cards['name'].tolist())
         used_cards.update(top_cards['name'].tolist())
-        
-    if 'Land' in scaled_counts and scaled_counts['Land'] > 0:
-        total_lands_needed = scaled_counts['Land']
-        land_candidates = df[df['type'] == 'Land']
-        
+    
+    # Fill non-basic land slot
+    num_non_basics = int(scaled_template.get('Non-Basic Land', 0))
+    if num_non_basics > 0:
+        pop_non_basics = popularity_table(non_basic_land_df)
+        top_lands = pop_non_basics[~pop_non_basics['name'].isin(used_cards)].head(num_non_basics)
+        decklist.extend(top_lands['name'].tolist())
+        used_cards.update(top_lands['name'].tolist())
+
+    # Fill basic land slot
+    num_basics = int(scaled_template.get('Basic Land', 0))
+    if num_basics > 0:
         basic_land_map = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest'}
         commander_basics = [basic_land_map[c] for c in color_identity if c in basic_land_map]
-        if not commander_basics: commander_basics = ['Wastes'] 
-
-        non_basic_lands = land_candidates[~land_candidates['name'].isin(basic_land_map.values())]
-        pop_non_basics = popularity_table(non_basic_lands)
+        if not commander_basics: commander_basics = ['Wastes']
         
-        avg_non_basics = int(non_basic_lands.groupby('deck_id').size().mean()) if not non_basic_lands.empty else 0
-        num_non_basics_to_add = min(avg_non_basics, total_lands_needed)
-
-        top_non_basics = pop_non_basics[~pop_non_basics['name'].isin(used_cards)].head(num_non_basics_to_add)
-        decklist.extend(top_non_basics['name'].tolist())
-        used_cards.update(top_non_basics['name'].tolist())
-        
-        num_basics_to_add = total_lands_needed - len(top_non_basics)
-        if num_basics_to_add > 0 and commander_basics:
-            basics_per_color = num_basics_to_add // len(commander_basics)
-            remainder = num_basics_to_add % len(commander_basics)
-            for i, land_name in enumerate(commander_basics):
-                count = basics_per_color + (1 if i < remainder else 0)
-                decklist.extend([land_name] * count)
+        basics_per_color = num_basics // len(commander_basics)
+        remainder = num_basics % len(commander_basics)
+        for i, land_name in enumerate(commander_basics):
+            count = basics_per_color + (1 if i < remainder else 0)
+            decklist.extend([land_name] * count)
 
     if len(decklist) < 100:
         remaining = 100 - len(decklist)
         all_pop = popularity_table(df)
         fillers = all_pop[~all_pop['name'].isin(used_cards)].head(remaining)
         decklist.extend(fillers['name'].tolist())
+        
+    return sorted(decklist)
 
-    return decklist[:100]
 
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
