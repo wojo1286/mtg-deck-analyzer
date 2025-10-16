@@ -219,6 +219,58 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
         decklist.extend(fillers['name'].tolist())
     return decklist, constraints
 
+def generate_average_deck(df, commander_slug):
+    """Generates a 100-card decklist based on average card types and popularity."""
+    if df.empty:
+        st.warning("Cannot generate average deck: No data available.")
+        return None
+    
+    # 1. Calculate average counts of each type per deck
+    type_counts_per_deck = df.groupby(['deck_id', 'type']).size().unstack(fill_value=0)
+    avg_type_counts = type_counts_per_deck.mean().round().astype(int)
+
+    # 2. Normalize counts to sum to 99 (for the main deck)
+    total_avg_cards = avg_type_counts.sum()
+    if total_avg_cards == 0:
+        st.warning("Cannot generate average deck: No card types found.")
+        return None
+        
+    scaled_counts = (avg_type_counts / total_avg_cards * 99).round().astype(int)
+    
+    # Adjust to make sure it's exactly 99
+    diff = 99 - scaled_counts.sum()
+    if diff != 0:
+        scaled_counts[scaled_counts.idxmax()] += diff
+
+    # 3. Fill slots with most popular cards
+    decklist = []
+    used_cards = set()
+    
+    # Add commander first
+    commander_name = commander_slug.replace('-', ' ').title()
+    decklist.append(commander_name)
+    used_cards.add(commander_name)
+    
+    for card_type, count in scaled_counts.items():
+        if count <= 0: continue
+        
+        candidates = df[df['type'] == card_type]
+        pop_table = popularity_table(candidates)
+        
+        top_cards = pop_table[~pop_table['name'].isin(used_cards)].head(count)
+        decklist.extend(top_cards['name'].tolist())
+        used_cards.update(top_cards['name'].tolist())
+
+    # If we are short, fill with most popular remaining spells
+    if len(decklist) < 100:
+        remaining_needed = 100 - len(decklist)
+        all_pop = popularity_table(df)
+        filler_cards = all_pop[~all_pop['name'].isin(used_cards)].head(remaining_needed)
+        decklist.extend(filler_cards['name'].tolist())
+
+    return decklist[:100]
+
+
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
 # ===================================================================
@@ -231,6 +283,9 @@ def main():
     if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
 
+    # Capture commander_slug for later use
+    commander_slug_for_avg = "ojer-axonil-deepest-might"
+
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
         categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
@@ -239,6 +294,7 @@ def main():
             if categories_file: categories_df = pd.read_csv(categories_file)
     elif data_source_option == "Scrape New Data":
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
+        commander_slug_for_avg = commander_slug # Update with user input
         
         bracket_options = {
             "All Decks": "", "Bracket 1 - Exhibition (Budget)": "exhibition", "Bracket 2 - Core": "core",
@@ -324,6 +380,13 @@ def main():
                     st.dataframe(missing_staples[['name', 'inclusion_rate']].round(1))
                 else:
                     st.warning("Please paste a decklist to analyze.")
+
+            st.subheader("Generate Average Deck")
+            if st.button("📊 Generate Average Deck"):
+                with st.spinner("Generating average deck..."):
+                    avg_deck = generate_average_deck(df, commander_slug_for_avg)
+                    if avg_deck:
+                        st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
 
             st.subheader("Generate a Deck Template")
             if FUNCTIONAL_ANALYSIS_ENABLED:
@@ -445,4 +508,3 @@ def main():
 if __name__ == "__main__":
     if setup_complete:
         main()
-
