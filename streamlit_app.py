@@ -63,7 +63,6 @@ setup_complete = setup_playwright()
 # 3. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
-# ... (All your helper functions: parse_table, run_scraper, clean_and_prepare_data, etc.)
 def parse_table(html, deck_id, deck_source):
     soup = BeautifulSoup(html, "html.parser")
     cards = []
@@ -125,6 +124,16 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 cards = parse_table(html, deck_id, deck_source)
+                
+                # --- NEW DEBUGGING LOGIC ---
+                if not cards:
+                    st.error(f"Failed to parse cards from {deck_url}. The website's HTML may have changed.")
+                    with st.expander("Show Raw HTML for Debugging"):
+                        st.code(html)
+                    st.warning("Stopping scraper to show debug info. Please provide the HTML above to the AI assistant.")
+                    return None # Stop the scraper
+                # --- END NEW LOGIC ---
+
                 if cards: all_cards.extend(cards)
                 time.sleep(random.uniform(1.0, 2.5))
             except Exception as e:
@@ -134,6 +143,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     
     if not all_cards: st.error("Scraping complete, but no cards were parsed."); return None
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards)
+
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -164,6 +174,7 @@ def parse_decklist(text: str) -> list:
     lines = text.strip().split('\n')
     return [re.sub(r'^\d+\s*x?\s*', '', line).strip() for line in lines if line.strip()]
 
+# ... (The rest of your functions: build_cococcurrence, _fill_deck_slots, etc. remain the same)
 def build_cococcurrence(source_df: pd.DataFrame, topN: int, exclude_staples_n: int, pop_all_df: pd.DataFrame) -> pd.DataFrame:
     working_df = source_df.copy()
     if exclude_staples_n > 0:
@@ -258,6 +269,7 @@ def main():
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
         st.header("Dashboard & Analysis")
+        # ... (Dashboard UI logic) ...
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -291,6 +303,7 @@ def main():
             curve = spells_df.groupby('cmc').size().reset_index(name='count')
             fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
 
+        # ... (All other tool implementations: Deck Analyzer, Template Generator, Synergy Tools)
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
             with st.expander("Functional Analysis"):
                 func_df = spells_df.copy()
@@ -434,5 +447,8 @@ def main():
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
 
 if __name__ == "__main__":
-    if setup_complete:
+    if 'setup_complete' in st.session_state and st.session_state.setup_complete:
+        main()
+    elif setup_complete:
+        st.session_state.setup_complete = True
         main()
