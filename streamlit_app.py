@@ -46,7 +46,7 @@ def setup_playwright():
                 check=True,
                 timeout=600  # Set a 10-minute timeout for the installation
             )
-        st.success("Playwright environment is ready.")
+        st.success("Playwright environment is ready!")
         with st.expander("Show installation logs"):
             st.code(process.stdout)
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -69,15 +69,33 @@ def parse_table(html, deck_id, deck_source):
     for table in soup.find_all("table"):
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
-            if len(tds) < 6: continue
+            if len(tds) < 6:
+                continue
             cmc_el = tr.find("span", class_="float-right")
             cmc = cmc_el.get_text(strip=True) if cmc_el else None
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
-            ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]), None)
-            price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
+            ctype = None
+            for td in tds:
+                text = td.get_text(strip=True)
+                if text in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]:
+                    ctype = text
+                    break
+            price = None
+            for td in reversed(tds):
+                txt = td.get_text(strip=True)
+                if txt.startswith("$"):
+                    price = txt
+                    break
             if name:
-                cards.append({"deck_id": deck_id, "deck_source": deck_source, "cmc": cmc, "name": name, "type": ctype, "price": price})
+                cards.append({
+                    "deck_id": deck_id,
+                    "deck_source": deck_source,
+                    "cmc": cmc,
+                    "name": name,
+                    "type": ctype,
+                    "price": price
+                })
     return cards
 
 def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bracket_name="All Decks"):
@@ -107,42 +125,53 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
 
     all_cards = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         for i, row in sample_df.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
-            status_text = st.empty()
             status_text.text(f"[{i+1}/{len(sample_df)}] Fetching {deck_url}")
             try:
                 page.goto(deck_url, timeout=90000)
+                
                 page.wait_for_selector('button.nav-link[aria-controls*="table"]', timeout=15000)
                 page.click('button.nav-link[aria-controls*="table"]')
                 page.wait_for_selector("table", timeout=20000)
+                
+                try:
+                    page.click("button#dropdown-item-button.dropdown-toggle", timeout=10000)
+                    page.wait_for_selector("button.dropdown-item", timeout=5000)
+                    for btn in page.query_selector_all("button.dropdown-item"):
+                        if "Type" in btn.inner_text():
+                            btn.click()
+                            break
+                    page.wait_for_selector("th:has-text('Type')", timeout=5000)
+                except Exception:
+                    pass
+
                 html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 cards = parse_table(html, deck_id, deck_source)
-                
-                # --- NEW DEBUGGING LOGIC ---
-                if not cards:
-                    st.error(f"Failed to parse cards from {deck_url}. The website's HTML may have changed.")
-                    with st.expander("Show Raw HTML for Debugging"):
-                        st.code(html)
-                    st.warning("Stopping scraper to show debug info. Please provide the HTML above to the AI assistant.")
-                    return None # Stop the scraper
-                # --- END NEW LOGIC ---
 
-                if cards: all_cards.extend(cards)
+                if cards: 
+                    all_cards.extend(cards)
+                else:
+                    st.warning(f"No cards parsed for {deck_url}.")
+                        
                 time.sleep(random.uniform(1.0, 2.5))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
             progress_bar.progress((i + 1) / len(sample_df))
         browser.close()
     
-    if not all_cards: st.error("Scraping complete, but no cards were parsed."); return None
-    st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards)
+    if not all_cards: 
+        st.error("Scraping complete, but no cards were successfully parsed across all decks."); 
+        return None
+    st.success("✅ Scraping complete!"); 
+    return pd.DataFrame(all_cards)
 
 
 @st.cache_data
@@ -174,7 +203,6 @@ def parse_decklist(text: str) -> list:
     lines = text.strip().split('\n')
     return [re.sub(r'^\d+\s*x?\s*', '', line).strip() for line in lines if line.strip()]
 
-# ... (The rest of your functions: build_cococcurrence, _fill_deck_slots, etc. remain the same)
 def build_cococcurrence(source_df: pd.DataFrame, topN: int, exclude_staples_n: int, pop_all_df: pd.DataFrame) -> pd.DataFrame:
     working_df = source_df.copy()
     if exclude_staples_n > 0:
@@ -269,7 +297,6 @@ def main():
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
         st.header("Dashboard & Analysis")
-        # ... (Dashboard UI logic) ...
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -303,7 +330,6 @@ def main():
             curve = spells_df.groupby('cmc').size().reset_index(name='count')
             fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
 
-        # ... (All other tool implementations: Deck Analyzer, Template Generator, Synergy Tools)
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
             with st.expander("Functional Analysis"):
                 func_df = spells_df.copy()
@@ -447,8 +473,5 @@ def main():
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
 
 if __name__ == "__main__":
-    if 'setup_complete' in st.session_state and st.session_state.setup_complete:
-        main()
-    elif setup_complete:
-        st.session_state.setup_complete = True
+    if setup_complete:
         main()
