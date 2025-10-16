@@ -69,32 +69,18 @@ def parse_table(html, deck_id, deck_source):
     for table in soup.find_all("table"):
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
-            if len(tds) < 6:
+            if len(tds) < 5:
                 continue
-            cmc_el = tr.find("span", class_="float-right")
-            cmc = cmc_el.get_text(strip=True) if cmc_el else None
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
-            ctype = None
-            for td in tds:
-                text = td.get_text(strip=True)
-                if text in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]:
-                    ctype = text
-                    break
-            price = None
-            for td in reversed(tds):
-                txt = td.get_text(strip=True)
-                if txt.startswith("$"):
-                    price = txt
-                    break
+            cmc_el = tr.find("span", class_="float-right")
+            cmc = cmc_el.get_text(strip=True) if cmc_el else None
+            ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]), None)
+            price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
             if name:
                 cards.append({
-                    "deck_id": deck_id,
-                    "deck_source": deck_source,
-                    "cmc": cmc,
-                    "name": name,
-                    "type": ctype,
-                    "price": price
+                    "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
+                    "name": name, "type": ctype, "price": price
                 })
     return cards
 
@@ -102,26 +88,23 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     st.info(f"🔍 Fetching deck metadata for '{commander_slug}' (Bracket: {bracket_name})...")
     
     base_url = f"https://json.edhrec.com/pages/decks/{commander_slug}"
-    if bracket_slug:
-        base_url += f"/{bracket_slug}"
-    if budget_slug:
-        base_url += f"/{budget_slug}"
+    if bracket_slug: base_url += f"/{bracket_slug}"
+    if budget_slug: base_url += f"/{budget_slug}"
     json_url = base_url + ".json"
 
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(json_url, headers=headers); r.raise_for_status(); data = r.json()
     except requests.RequestException as e:
-        st.error(f"Failed to fetch metadata from EDHREC. URL: {json_url}. Error: {e}"); return None
+        st.error(f"Failed to fetch metadata. Error: {e}"); return None
 
     decks = data.get("table", [])
     if not decks:
-        st.error(f"No decks found for '{commander_slug}' in the '{bracket_name}' bracket."); return None
+        st.error(f"No decks found for '{commander_slug}' in '{bracket_name}'."); return None
 
-    df_meta = pd.json_normalize(decks)
+    df_meta = pd.json_normalize(decks).head(deck_limit)
     df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https://edhrec.com/deckpreview/{x}")
-    sample_df = df_meta.head(deck_limit)
-    st.success(f"Found {len(decks)} total decks. Scraping the first {len(sample_df)}.")
+    st.success(f"Found {len(decks)} decks. Scraping the first {len(df_meta)}.")
 
     all_cards = []
     progress_bar = st.progress(0)
@@ -130,26 +113,15 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
-        for i, row in sample_df.iterrows():
+        for i, row in df_meta.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
-            status_text.text(f"[{i+1}/{len(sample_df)}] Fetching {deck_url}")
+            status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
             try:
                 page.goto(deck_url, timeout=90000)
+                page.click('button[data-rr-ui-event-key="table"]')
                 
-                page.wait_for_selector('button.nav-link[aria-controls*="table"]', timeout=15000)
-                page.click('button.nav-link[aria-controls*="table"]')
-                page.wait_for_selector("table", timeout=20000)
-                
-                try:
-                    page.click("button#dropdown-item-button.dropdown-toggle", timeout=10000)
-                    page.wait_for_selector("button.dropdown-item", timeout=5000)
-                    for btn in page.query_selector_all("button.dropdown-item"):
-                        if "Type" in btn.inner_text():
-                            btn.click()
-                            break
-                    page.wait_for_selector("th:has-text('Type')", timeout=5000)
-                except Exception:
-                    pass
+                page.wait_for_selector("table tbody tr", timeout=20000)
+                page.wait_for_timeout(500)
 
                 html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
@@ -159,19 +131,17 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 if cards: 
                     all_cards.extend(cards)
                 else:
-                    st.warning(f"No cards parsed for {deck_url}.")
+                    st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                         
-                time.sleep(random.uniform(1.0, 2.5))
+                time.sleep(random.uniform(0.5, 1.5))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
-            progress_bar.progress((i + 1) / len(sample_df))
+            progress_bar.progress((i + 1) / len(df_meta))
         browser.close()
     
     if not all_cards: 
-        st.error("Scraping complete, but no cards were successfully parsed across all decks."); 
-        return None
-    st.success("✅ Scraping complete!"); 
-    return pd.DataFrame(all_cards)
+        st.error("Scraping complete, but no cards were parsed."); return None
+    st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards)
 
 
 @st.cache_data
@@ -303,7 +273,7 @@ def main():
             main_top_n = st.slider('Top N Staples:', 5, 100, 25, 5)
             exclude_top = st.checkbox('Exclude Top N Staples', False)
         with col2:
-            unique_types = sorted(df['type'].unique())
+            unique_types = sorted([t for t in df['type'].unique() if t is not None])
             exclude_types = st.multiselect('Exclude Types:', options=unique_types, default=[])
 
         filtered_df = df.copy()
@@ -475,3 +445,4 @@ def main():
 if __name__ == "__main__":
     if setup_complete:
         main()
+
