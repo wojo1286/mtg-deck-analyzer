@@ -49,6 +49,11 @@ def parse_table(html, deck_id, deck_source):
 
 def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bracket_name="All Decks"):
     """Main function to scrape decklists for a given commander from EDHREC."""
+    
+    # NEW: Add runtime browser installation
+    with st.spinner("Preparing scraper... (This may take a moment on the first run)"):
+        os.system("playwright install chromium")
+    
     st.info(f"🔍 Fetching deck metadata for '{commander_slug}' (Bracket: {bracket_name})...")
     
     base_url = f"https://json.edhrec.com/pages/decks/{commander_slug}"
@@ -77,7 +82,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     progress_bar = st.progress(0)
     
     with sync_playwright() as p:
-        # FIX: Revert to Chromium with the necessary arguments for Streamlit Cloud
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         for i, row in sample_df.iterrows():
