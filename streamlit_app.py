@@ -22,7 +22,6 @@ def setup_playwright():
             "-m",
             "playwright",
             "install",
-            "--with-deps",
             "chromium"
         ]
 
