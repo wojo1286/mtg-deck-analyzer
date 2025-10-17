@@ -308,6 +308,7 @@ def generate_average_deck(df, commander_slug, color_identity):
         
     return sorted(decklist)
 @st.cache_data(ttl=604800) # Cache for 7 days
+@st.cache_data(ttl=604800) # Cache for 7 days
 def import_edhrec_categories():
     """
     Builds a functional category list by fetching card recommendations
@@ -338,14 +339,22 @@ def import_edhrec_categories():
             response.raise_for_status()
             data = response.json()
 
-            # The 'cardlist' contains the categorized card recommendations
-            if 'cardlist' in data:
-                for category_group in data['cardlist']:
+            # ===================================================================
+            # CORRECTED LOGIC HERE
+            # The data is now nested deeper and the key is "cardlists" (plural).
+            # We use .get() to safely navigate the nested dictionary.
+            # ===================================================================
+            cardlists = data.get("container", {}).get("json_dict", {}).get("cardlists", [])
+
+            if cardlists:
+                for category_group in cardlists:
                     category_name = category_group.get('header', '').lower().strip()
                     if category_name and category_name not in excluded_categories:
                         # Clean up the category name (e.g., "board wipes" -> "Board Wipe")
                         clean_name = ' '.join(word.capitalize() for word in category_name.split())
-                        if "Removal" in clean_name: clean_name = "Removal" # Consolidate removal types
+                        # Consolidate different removal types into one for simplicity
+                        if "Removal" in clean_name or "Wipe" in clean_name: 
+                            clean_name = "Removal" 
 
                         for card in category_group.get('cardviews', []):
                             card_name = card.get('name')
@@ -360,12 +369,14 @@ def import_edhrec_categories():
             continue
 
     progress_bar.empty()
-    st.toast(f"Successfully compiled categories for {len(all_card_tags)} cards from EDHREC!", icon="✅")
-
+    
     if not all_card_tags:
+        # This error will now only show if all commanders fail to load
         st.error("Failed to import any categories from EDHREC.")
         return pd.DataFrame()
 
+    st.toast(f"Successfully compiled categories for {len(all_card_tags)} cards from EDHREC!", icon="✅")
+    
     # Convert the dictionary to the required DataFrame format
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
