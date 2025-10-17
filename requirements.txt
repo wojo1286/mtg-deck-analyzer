@@ -8,4 +8,4 @@ lxml
 playwright
 mlxtend
 scikit-learn
-streamlit-gsheets
+st-gsheets-connection
