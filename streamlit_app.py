@@ -319,7 +319,7 @@ def import_edhrec_categories():
         "chulane-teller-of-tales", "prosper-tome-bound", "yuriko-the-tigers-shadow",
         "meren-of-clan-nel-toth", "krenko-mob-boss", "urza-lord-high-artificer",
         "the-ur-dragon", "sythis-harvests-hand", "light-paws-emperors-voice",
-        "tatyova-benthic-druid", "tergrid-god-of-fright", "zedruu-the-greathearted"
+        "tatyova-benthic-druid", "tergrid-god-of-fright", "ojer-axonil-deepest-might", "zedruu-the-greathearted"
     ]
     excluded_categories = ["high synergy cards", "top cards", "new cards", "utility lands"]
     all_card_tags = {}
