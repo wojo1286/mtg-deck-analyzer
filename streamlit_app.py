@@ -515,7 +515,7 @@ def main():
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
             st.rerun()
 
-    # NEW: Button to scrape Tagger based on Google Sheet list
+    # Button to scrape Tagger based on Google Sheet list
     if st.session_state.gsheets_connected:
         if st.sidebar.button("Scrape Tagger for GSheet Cards 🔎"):
             if 'master_categories' in st.session_state and not st.session_state.master_categories.empty:
@@ -535,26 +535,57 @@ def main():
         with st.spinner("Loading your categories from Google Sheets..."):
             st.session_state.master_categories = conn.read(worksheet="Categories")
 
-    # Merging logic
+    # ===============================================================
+    # NEW MERGING LOGIC
+    # ===============================================================
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
 
-    if not gsheets_df.empty and not imported_df.empty:
+    # Ensure gsheets_df has the right columns even if empty
+    if gsheets_df is None or gsheets_df.empty:
+        gsheets_df = pd.DataFrame(columns=['name', 'category'])
+    
+    # Ensure imported_df has the right columns even if empty
+    if imported_df is None or imported_df.empty:
+        imported_df = pd.DataFrame(columns=['name', 'category'])
+
+    if not gsheets_df.empty or not imported_df.empty:
         st.sidebar.info("Combining Imported Tags with your Google Sheet.")
-        categories_df_master = pd.concat([imported_df, gsheets_df]).drop_duplicates(subset=['name'], keep='last').sort_values('name').reset_index(drop=True)
+        
+        # Outer merge to get all cards from both sources
+        merged_df = pd.merge(
+            gsheets_df, 
+            imported_df, 
+            on='name', 
+            how='outer', 
+            suffixes=('_gsheet', '_imported')
+        )
+        
+        # Replace NaN with empty strings to make logic easier
+        merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
+        merged_df['category_imported'] = merged_df['category_imported'].fillna('')
+        
+        # Prioritize GSheet, but use imported tag if GSheet is blank
+        merged_df['category'] = np.where(
+            merged_df['category_gsheet'] != '', 
+            merged_df['category_gsheet'], 
+            merged_df['category_imported']
+        )
+        
+        categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
+        
     elif not gsheets_df.empty:
         st.sidebar.info("Using your categories from Google Sheets.")
         categories_df_master = gsheets_df
     elif not imported_df.empty:
         st.sidebar.info("Using Imported Tags as a base.")
         categories_df_master = imported_df
+    # ===============================================================
+    # END OF NEW MERGING LOGIC
+    # ===============================================================
 
     st.sidebar.divider()
-    # ===============================================================
-    # END OF CATEGORY LOGIC
-    # ===============================================================
-
 
     # --- MAIN APP DISPLAY LOGIC ---
     if df_raw is not None:
@@ -595,9 +626,6 @@ def main():
             curve = spells_df.groupby('cmc').size().reset_index(name='count')
             fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
 
-        # ===============================================================
-        # THIS IS THE CORRECTED BLOCK
-        # ===============================================================
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
             with st.expander("Functional Analysis"):
                 func_df = spells_df.copy()
@@ -616,9 +644,6 @@ def main():
                 else:
                     # Show a message if there's no data to plot
                     st.info("No categorized card functions found to display in the analysis.")
-        # ===============================================================
-        # END OF CORRECTION
-        # ===============================================================
 
         with st.expander("Personal Deckbuilding Tools", expanded=True):
             st.subheader("Analyze Your Decklist")
@@ -642,7 +667,7 @@ def main():
                 with st.spinner("Generating average deck..."):
                     decks_in_range = deck_prices[(deck_prices >= price_range[0]) & (deck_prices <= price_range[1])].index
                     filtered_price_df = df[df['deck_id'].isin(decks_in_range)]
-                    avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.commander_colors)
+                    avg_.json.decoder.JSONDecodeErrordeck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.commander_colors)
                     if avg_deck:
                         st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.commander_colors) if st.session_state.commander_colors else 'None'}")
                         st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
@@ -708,8 +733,11 @@ def main():
             with st.expander("Card Category Editor", expanded=False):
                 st.info("Here you can add or edit categories for all unique cards found in the current dataset. Changes will be saved to your Google Sheet.")
                 
+                # The unique cards are from the scraped data (df)
                 unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
                 
+                # Merge these unique cards with the master list to show them in the editor
+                # categories_df_master now contains the combined (GSheet + Imported) tags
                 editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
                 
                 st.write("Edit categories below (use '|' to separate multiple functions):")
@@ -723,6 +751,9 @@ def main():
                 
                 if st.button("💾 Save Changes to Google Sheet"):
                     with st.spinner("Saving to Google Sheet..."):
+                        # This part correctly saves the *editor's* content, which is what we want.
+                        # We merge the editor_df (what you see) with the master_categories (GSheet state)
+                        # to update the master list.
                         updated_master = pd.concat([
                             st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
                             edited_df
