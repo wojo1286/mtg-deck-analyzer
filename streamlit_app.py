@@ -363,6 +363,7 @@ def scrape_scryfall_tagger(card_names: list):
     """
     Scrapes the Scryfall Tagger page for a given list of unique card names.
     Uses the card's set and collector number for a precise URL.
+    Waits for the tag elements themselves to load.
     """
     EXCLUDED_TAGS = {
         'abrade', 'modal', 'single english word name', 'functional reprint',
@@ -388,7 +389,7 @@ def scrape_scryfall_tagger(card_names: list):
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
                 
                 response = requests.get(api_url)
-                response.raise_for_status() # This will raise an error if the card isn't found
+                response.raise_for_status() 
                 card_data = response.json()
                 
                 set_code = card_data['set']
@@ -397,26 +398,39 @@ def scrape_scryfall_tagger(card_names: list):
 
                 # Step 2: Scrape the Tagger page
                 page.goto(tagger_url, timeout=30000)
-                page.wait_for_selector("h2:has-text('Card')", timeout=20000)
+                
+                # ==========================================================
+                # NEW ROBUST WAITER
+                # Wait for the specific 'a' tag (the link) to appear.
+                # This confirms the dynamic content has loaded.
+                # ==========================================================
+                page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
                 
                 html = page.content()
                 soup = BeautifulSoup(html, "html.parser")
 
-                card_header = soup.find('h2', string='Card')
+                # Find the 'Card' header (making search flexible with regex)
+                card_header = soup.find('h2', string=re.compile(r'^\s*Card\s*$'))
+                
                 if card_header:
-                    # Find the next sibling <div> which acts as the container
+                    # Find the <div> container that is the *next* element
                     tag_container = card_header.find_next_sibling('div')
                     if tag_container:
-                        # ==========================================================
-                        # CORRECTED SELECTOR based on your screenshots
-                        # Find all <a> tags whose href starts with /tags/card/
-                        # ==========================================================
+                        # Find all the tags within that specific container
                         tags = tag_container.find_all('a', href=re.compile(r'^/tags/card/'))
-                        
                         for tag in tags:
                             tag_text = tag.get_text(strip=True)
                             if tag_text not in EXCLUDED_TAGS:
                                 card_tags.add(tag_text.replace('-', ' ').capitalize())
+
+                # FALLBACK: If the header logic fails, just find all card tags
+                # on the page. This is less precise but better than nothing.
+                if not card_tags:
+                    all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
+                    for tag in all_tags:
+                        tag_text = tag.get_text(strip=True)
+                        if tag_text not in EXCLUDED_TAGS:
+                            card_tags.add(tag_text.replace('-', ' ').capitalize())
                 
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
@@ -424,7 +438,8 @@ def scrape_scryfall_tagger(card_names: list):
                 time.sleep(random.uniform(0.1, 0.25))
 
             except Exception as e:
-                st.warning(f"Could not scrape '{name}': {e}")
+                # This will catch timeouts from the wait_for_selector
+                st.warning(f"Could not scrape '{name}'. (Error: {e})")
                 continue
         
         browser.close()
