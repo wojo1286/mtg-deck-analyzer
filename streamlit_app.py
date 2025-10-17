@@ -308,13 +308,12 @@ def generate_average_deck(df, commander_slug, color_identity):
         
     return sorted(decklist)
 @st.cache_data(ttl=604800) # Cache for 7 days
-@st.cache_data(ttl=604800) # Cache for 7 days
 def import_edhrec_categories():
     """
     Builds a functional category list by fetching card recommendations
     from several popular and color-diverse commanders on EDHREC.
+    THIS IS A PURE DATA FUNCTION and is safe to cache.
     """
-    # List of diverse commanders to pull varied category data from
     commander_slugs = [
         "atraxa-praetors-voice", "kenrith-the-returned-king", "korvold-fae-cursed-king",
         "chulane-teller-of-tales", "prosper-tome-bound", "yuriko-the-tigers-shadow",
@@ -322,37 +321,22 @@ def import_edhrec_categories():
         "the-ur-dragon", "sythis-harvests-hand", "light-paws-emperors-voice",
         "tatyova-benthic-druid", "tergrid-god-of-fright", "zedruu-the-greathearted"
     ]
-
-    # Categories to ignore as they are not functional descriptions
     excluded_categories = ["high synergy cards", "top cards", "new cards", "utility lands"]
-
     all_card_tags = {}
-    progress_bar = st.progress(0, text="Initializing EDHREC category import...")
 
-    for i, slug in enumerate(commander_slugs):
-        progress_text = f"Fetching categories from '{slug}' ({i+1}/{len(commander_slugs)})..."
-        progress_bar.progress((i + 1) / len(commander_slugs), text=progress_text)
-        
+    for slug in commander_slugs:
         try:
             url = f"https://json.edhrec.com/pages/commanders/{slug}.json"
             response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
             response.raise_for_status()
             data = response.json()
-
-            # ===================================================================
-            # CORRECTED LOGIC HERE
-            # The data is now nested deeper and the key is "cardlists" (plural).
-            # We use .get() to safely navigate the nested dictionary.
-            # ===================================================================
+            
             cardlists = data.get("container", {}).get("json_dict", {}).get("cardlists", [])
-
             if cardlists:
                 for category_group in cardlists:
                     category_name = category_group.get('header', '').lower().strip()
                     if category_name and category_name not in excluded_categories:
-                        # Clean up the category name (e.g., "board wipes" -> "Board Wipe")
                         clean_name = ' '.join(word.capitalize() for word in category_name.split())
-                        # Consolidate different removal types into one for simplicity
                         if "Removal" in clean_name or "Wipe" in clean_name: 
                             clean_name = "Removal" 
 
@@ -362,22 +346,14 @@ def import_edhrec_categories():
                                 if card_name not in all_card_tags:
                                     all_card_tags[card_name] = set()
                                 all_card_tags[card_name].add(clean_name)
-            time.sleep(0.5) # Be polite to the API
-
-        except requests.RequestException as e:
-            st.warning(f"Could not fetch data for {slug}. Skipping. Error: {e}")
+            time.sleep(0.25) # Be polite to the API
+        except (requests.RequestException, json.JSONDecodeError):
+            # We just skip failures in the cached function
             continue
-
-    progress_bar.empty()
-    
+            
     if not all_card_tags:
-        # This error will now only show if all commanders fail to load
-        st.error("Failed to import any categories from EDHREC.")
         return pd.DataFrame()
 
-    st.toast(f"Successfully compiled categories for {len(all_card_tags)} cards from EDHREC!", icon="✅")
-    
-    # Convert the dictionary to the required DataFrame format
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
@@ -395,17 +371,22 @@ def main():
         st.session_state.gsheets_connected = False
         st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
 
-
+    # ===============================================================
+    # CARD CATEGORY DATA LOADING LOGIC
+    # ===============================================================
     st.sidebar.header("Card Categories")
 
-# MODIFIED: Button to load EDHREC data into session state
     if st.sidebar.button("Import Categories from EDHREC 📋"):
-        with st.spinner("Importing functional categories from EDHREC..."):
+        # The UI elements are now OUTSIDE the cached function
+        with st.spinner("Importing functional categories from EDHREC... (This may take a moment on the first run)"):
             edhrec_tags_df = import_edhrec_categories()
-            if not edhrec_tags_df.empty:
-                # We rename the column to 'scryfall_tags' in session state to avoid
-                # changing the logic below. This makes it a drop-in replacement.
-                st.session_state.scryfall_tags = edhrec_tags_df
+        
+        if not edhrec_tags_df.empty:
+            # We use a consistent key in session_state for the imported data
+            st.session_state.imported_tags = edhrec_tags_df
+            st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
+        else:
+            st.error("Failed to import any categories from EDHREC.")
 
     # Load Google Sheets data if connected
     if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
@@ -416,35 +397,27 @@ def main():
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     
     # Get data from session state
-    # This part remains THE SAME, as we stored the EDHREC data under the same key
-    scryfall_df = st.session_state.get('scryfall_tags', pd.DataFrame())
+    imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
 
     # Combine data sources, giving precedence to Google Sheets
-    if not gsheets_df.empty and not scryfall_df.empty:
+    if not gsheets_df.empty and not imported_df.empty:
         st.sidebar.info("Combining EDHREC tags with your Google Sheet.")
-        categories_df_master = pd.concat([scryfall_df, gsheets_df]).drop_duplicates(subset=['name'], keep='last').sort_values('name').reset_index(drop=True)
+        categories_df_master = pd.concat([imported_df, gsheets_df]).drop_duplicates(subset=['name'], keep='last').sort_values('name').reset_index(drop=True)
     elif not gsheets_df.empty:
         st.sidebar.info("Using your categories from Google Sheets.")
         categories_df_master = gsheets_df
-    elif not scryfall_df.empty:
+    elif not imported_df.empty:
         st.sidebar.info("Using EDHREC categories as a base.")
-        categories_df_master = scryfall_df
+        categories_df_master = imported_df
 
     st.sidebar.divider() # Visual separator for clarity
+    # ===============================================================
+    # END OF NEW LOGIC
+    # ===============================================================
 
-    st.sidebar.divider() # Visual separator for clarity
-    
-    st.sidebar.header("Data Source")
+    st.sidebar.header("Deck Data Source")
     df_raw = None
-    categories_df_master = pd.DataFrame(columns=['name', 'category'])
-
-    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
-        with st.spinner("Loading master category list from Google Sheets..."):
-            st.session_state.master_categories = conn.read(worksheet="Categories")
-
-    if st.session_state.gsheets_connected:
-        categories_df_master = st.session_state.master_categories
     
     if 'commander_colors' not in st.session_state: st.session_state.commander_colors = []
     
@@ -454,7 +427,7 @@ def main():
 
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
-        if not st.session_state.gsheets_connected:
+        if not st.session_state.gsheets_connected and categories_df_master.empty:
             categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
             if categories_file: categories_df_master = pd.read_csv(categories_file)
         if decklist_file:
@@ -486,7 +459,7 @@ def main():
         if st.session_state.scraped_df is not None:
             df_raw = st.session_state.scraped_df
             st.sidebar.success("Scraped data is loaded.")
-            if not st.session_state.gsheets_connected:
+            if not st.session_state.gsheets_connected and categories_df_master.empty:
                 categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
                 if categories_file: categories_df_master = pd.read_csv(categories_file)
 
@@ -586,7 +559,7 @@ def main():
                                 constraints['functions'][cat] = {'target': [min_val, max_val], 'current': 0}
 
                     with st.expander("Card Type Constraints"):
-                         for cat in type_categories_list:
+                          for cat in type_categories_list:
                             col1, col2 = st.columns([1, 3])
                             is_enabled = col1.checkbox(cat, value=False, key=f"check_type_{cat}")
                             if is_enabled:
@@ -621,7 +594,7 @@ def main():
                             with t2:
                                 st.dataframe(eff_df)
             else:
-                st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
+                st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
 
         if st.session_state.gsheets_connected:
             with st.expander("Card Category Editor", expanded=False):
@@ -629,7 +602,8 @@ def main():
                 
                 unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
                 
-                editor_df = pd.merge(unique_cards_df, st.session_state.master_categories, on='name', how='left').fillna('')
+                # Merge unique cards with the MASTER list for editing
+                editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
                 
                 st.write("Edit categories below (use '|' to separate multiple functions):")
                 edited_df = st.data_editor(
@@ -642,6 +616,7 @@ def main():
                 
                 if st.button("💾 Save Changes to Google Sheet"):
                     with st.spinner("Saving to Google Sheet..."):
+                        # Update the master list in session state first
                         updated_master = pd.concat([
                             st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
                             edited_df
@@ -679,7 +654,7 @@ def main():
                     plot_df = pd.merge(plot_df, df[['name', 'type']].drop_duplicates().rename(columns={'name': 'card_name'}), on='card_name', how='left')
                     fig = px.scatter(plot_df, x='x', y='y', hover_name='card_name', color='type', title='Card Synergy Map', height=800)
                     st.plotly_chart(fig, use_container_width=True)
-                
+            
             st.subheader("Synergy Heatmap")
             h_col1, h_col2 = st.columns(2)
             with h_col1:
@@ -687,7 +662,7 @@ def main():
             with h_col2:
                 heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1, key="heatmap_exclude_n")
             if st.button("🔥 Build Heatmap"):
-                 with st.spinner("Building Heatmap..."):
+                with st.spinner("Building Heatmap..."):
                     co = build_cococcurrence(filtered_df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
                     if co.empty: st.warning("Co-occurrence matrix is empty.")
                     else:
@@ -714,8 +689,3 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
-
-if __name__ == "__main__":
-    if setup_complete:
-        main()
-
