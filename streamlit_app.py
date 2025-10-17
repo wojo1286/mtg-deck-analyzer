@@ -24,8 +24,8 @@ import plotly.graph_objects as go
 from mlxtend.frequent_patterns import apriori
 from sklearn.manifold import TSNE
 
-# --- Google Sheets Connection ---
-from streamlit_gsheets import GSheetsConnection
+# --- Google Sheets Connection (THE CORRECT IMPORT) ---
+from st-gsheets-connection import GSheetsConnection
 
 # --- Page Config ---
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
