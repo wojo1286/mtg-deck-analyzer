@@ -385,6 +385,9 @@ def main():
             # We use a consistent key in session_state for the imported data
             st.session_state.imported_tags = edhrec_tags_df
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
+
+            st.dataframe(edhrec_tags_df)
+        
         else:
             st.error("Failed to import any categories from EDHREC.")
 
