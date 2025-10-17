@@ -307,99 +307,68 @@ def generate_average_deck(df, commander_slug, color_identity):
         decklist.extend(fillers['name'].tolist())
         
     return sorted(decklist)
-def download_file(url, local_path, chunk_size=8192):
-    """Downloads a file from a URL to a local path with a Streamlit progress bar."""
-    try:
-        with requests.get(url, stream=True) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            progress_bar = st.progress(0, text=f"Downloading {local_path.name}...")
-            status_text = st.empty()
-            bytes_downloaded = 0
-            with open(local_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=chunk_size):
-                    f.write(chunk)
-                    bytes_downloaded += len(chunk)
-                    if total_size > 0:
-                        progress = min(bytes_downloaded / total_size, 1.0)
-                        # Format text to show MB downloaded
-                        status_text.text(f"Downloading {local_path.name}... {bytes_downloaded // 1024**2}MB / {total_size // 1024**2}MB")
-                        progress_bar.progress(progress)
-            status_text.success(f"✅ Download of {local_path.name} complete.")
-            # Keep success message for a moment, then clear
-            time.sleep(2)
-            status_text.empty()
-            progress_bar.empty()
-            return True
-    except requests.RequestException as e:
-        st.error(f"Failed to download {url}. Error: {e}")
-        return False
-
-@st.cache_data(ttl=86400) # Cache data for 24 hours to get daily updates
-def load_scryfall_tagger_data():
+@st.cache_data(ttl=604800) # Cache for 7 days
+def import_edhrec_categories():
     """
-    Downloads Scryfall Oracle card data (for name-ID mapping) and community
-    tagger data, then merges them to create a name -> category DataFrame.
-    The data is stored locally in a .data directory to avoid re-downloads.
+    Builds a functional category list by fetching card recommendations
+    from several popular and color-diverse commanders on EDHREC.
     """
-    st.toast("Checking for Scryfall data updates...")
-    DATA_DIR = Path(".data")
-    DATA_DIR.mkdir(exist_ok=True)
-    ORACLE_CARDS_PATH = DATA_DIR / "oracle-cards.json"
-    TAGGER_DATA_PATH = DATA_DIR / "card-tags.json"
+    # List of diverse commanders to pull varied category data from
+    commander_slugs = [
+        "atraxa-praetors-voice", "kenrith-the-returned-king", "korvold-fae-cursed-king",
+        "chulane-teller-of-tales", "prosper-tome-bound", "yuriko-the-tigers-shadow",
+        "meren-of-clan-nel-toth", "krenko-mob-boss", "urza-lord-high-artificer",
+        "the-ur-dragon", "sythis-harvests-hand", "light-paws-emperors-voice",
+        "tatyova-benthic-druid", "tergrid-god-of-fright", "zedruu-the-greathearted"
+    ]
 
-    # --- Part 1: Get Oracle Cards Data (for name <-> ID mapping) ---
-    if not ORACLE_CARDS_PATH.exists():
-        with st.spinner("Fetching Scryfall bulk data manifest..."):
-            try:
-                bulk_data_url = "https://api.scryfall.com/bulk-data"
-                response = requests.get(bulk_data_url)
-                response.raise_for_status()
-                bulk_data = response.json()
-                oracle_url = next((item['download_uri'] for item in bulk_data['data'] if item['type'] == 'oracle_cards'), None)
+    # Categories to ignore as they are not functional descriptions
+    excluded_categories = ["high synergy cards", "top cards", "new cards", "utility lands"]
 
-                if not oracle_url:
-                    st.error("Could not find 'oracle_cards' download URL in Scryfall bulk data.")
-                    return pd.DataFrame()
-            except (requests.RequestException, json.JSONDecodeError) as e:
-                st.error(f"Failed to fetch Scryfall bulk data manifest: {e}")
-                return pd.DataFrame()
+    all_card_tags = {}
+    progress_bar = st.progress(0, text="Initializing EDHREC category import...")
 
-        st.info("Oracle cards data not found locally. Downloading from Scryfall (this may take a minute)...")
-        if not download_file(oracle_url, ORACLE_CARDS_PATH):
-            return pd.DataFrame()
-
-    with st.spinner("Loading Oracle cards data..."):
-        oracle_df = pd.read_json(ORACLE_CARDS_PATH)
-        # Handle multi-faced cards by only keeping the first name (e.g., "Animus of Predation // Animus of Predation")
-        oracle_df['name'] = oracle_df['name'].apply(lambda x: x.split(' // ')[0])
-        oracle_df = oracle_df[['id', 'name']]
-
-    # --- Part 2: Get Tagger Data ---
-    #
-    # THIS IS THE CORRECTED URL
-    #
-    TAGGER_URL = "https://raw.githubusercontent.com/scryfall/tagger-data/main/json/card-tags.json"
-    
-    if not TAGGER_DATA_PATH.exists():
-        st.info("Scryfall Tagger data not found locally. Downloading...")
-        if not download_file(TAGGER_URL, TAGGER_DATA_PATH):
-            return pd.DataFrame()
-
-    with st.spinner("Loading and processing Tagger data..."):
-        with open(TAGGER_DATA_PATH, 'r', encoding='utf-8') as f:
-            tagger_data = json.load(f)
+    for i, slug in enumerate(commander_slugs):
+        progress_text = f"Fetching categories from '{slug}' ({i+1}/{len(commander_slugs)})..."
+        progress_bar.progress((i + 1) / len(commander_slugs), text=progress_text)
         
-        tagger_list = [{"id": card_id, "category": "|".join(tags)} for card_id, tags in tagger_data.items()]
-        tagger_df = pd.DataFrame(tagger_list)
+        try:
+            url = f"https://json.edhrec.com/pages/commanders/{slug}.json"
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            data = response.json()
 
-    # --- Part 3: Merge and Finalize ---
-    with st.spinner("Merging Scryfall data..."):
-        final_df = pd.merge(oracle_df, tagger_df, on='id', how='inner')
-        final_df = final_df[['name', 'category']].drop_duplicates(subset=['name']).reset_index(drop=True)
+            # The 'cardlist' contains the categorized card recommendations
+            if 'cardlist' in data:
+                for category_group in data['cardlist']:
+                    category_name = category_group.get('header', '').lower().strip()
+                    if category_name and category_name not in excluded_categories:
+                        # Clean up the category name (e.g., "board wipes" -> "Board Wipe")
+                        clean_name = ' '.join(word.capitalize() for word in category_name.split())
+                        if "Removal" in clean_name: clean_name = "Removal" # Consolidate removal types
 
-    st.toast(f"Loaded {len(final_df)} functional tags from Scryfall!", icon="📚")
-    return final_df
+                        for card in category_group.get('cardviews', []):
+                            card_name = card.get('name')
+                            if card_name:
+                                if card_name not in all_card_tags:
+                                    all_card_tags[card_name] = set()
+                                all_card_tags[card_name].add(clean_name)
+            time.sleep(0.5) # Be polite to the API
+
+        except requests.RequestException as e:
+            st.warning(f"Could not fetch data for {slug}. Skipping. Error: {e}")
+            continue
+
+    progress_bar.empty()
+    st.toast(f"Successfully compiled categories for {len(all_card_tags)} cards from EDHREC!", icon="✅")
+
+    if not all_card_tags:
+        st.error("Failed to import any categories from EDHREC.")
+        return pd.DataFrame()
+
+    # Convert the dictionary to the required DataFrame format
+    final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
+    return pd.DataFrame(final_data)
 
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
@@ -415,17 +384,17 @@ def main():
         st.session_state.gsheets_connected = False
         st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
 
-# ===============================================================
-    # NEW: CARD CATEGORY DATA LOADING LOGIC
-    # ===============================================================
+
     st.sidebar.header("Card Categories")
 
-    # Button to load Scryfall data into session state
-    if st.sidebar.button("Download/Load Scryfall Community Tags 📚"):
-        with st.spinner("Loading Scryfall data, this may involve a download..."):
-            scryfall_tags_df = load_scryfall_tagger_data()
-            if not scryfall_tags_df.empty:
-                st.session_state.scryfall_tags = scryfall_tags_df
+# MODIFIED: Button to load EDHREC data into session state
+    if st.sidebar.button("Import Categories from EDHREC 📋"):
+        with st.spinner("Importing functional categories from EDHREC..."):
+            edhrec_tags_df = import_edhrec_categories()
+            if not edhrec_tags_df.empty:
+                # We rename the column to 'scryfall_tags' in session state to avoid
+                # changing the logic below. This makes it a drop-in replacement.
+                st.session_state.scryfall_tags = edhrec_tags_df
 
     # Load Google Sheets data if connected
     if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
@@ -436,19 +405,22 @@ def main():
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     
     # Get data from session state
+    # This part remains THE SAME, as we stored the EDHREC data under the same key
     scryfall_df = st.session_state.get('scryfall_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
 
     # Combine data sources, giving precedence to Google Sheets
     if not gsheets_df.empty and not scryfall_df.empty:
-        st.sidebar.info("Combining Scryfall tags with your Google Sheet.")
+        st.sidebar.info("Combining EDHREC tags with your Google Sheet.")
         categories_df_master = pd.concat([scryfall_df, gsheets_df]).drop_duplicates(subset=['name'], keep='last').sort_values('name').reset_index(drop=True)
     elif not gsheets_df.empty:
         st.sidebar.info("Using your categories from Google Sheets.")
         categories_df_master = gsheets_df
     elif not scryfall_df.empty:
-        st.sidebar.info("Using Scryfall community tags as a base.")
+        st.sidebar.info("Using EDHREC categories as a base.")
         categories_df_master = scryfall_df
+
+    st.sidebar.divider() # Visual separator for clarity
 
     st.sidebar.divider() # Visual separator for clarity
     
