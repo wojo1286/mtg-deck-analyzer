@@ -484,7 +484,7 @@ def main():
         
         if st.sidebar.button("🚀 Start Scraping"):
             with st.spinner("Scraping in progress... this may take several minutes."):
-                # Simplified for clarity, assuming default brackets for now
+                # Assuming default brackets for simplicity, add back if needed
                 df_scraped, colors = run_scraper(commander_slug, deck_limit)
                 st.session_state.scraped_df = df_scraped
                 st.session_state.commander_colors = colors
@@ -508,13 +508,41 @@ def main():
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
             st.rerun()
 
+    # Load Google Sheets data if connected
+    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
+        with st.spinner("Loading your categories from Google Sheets..."):
+            st.session_state.master_categories = conn.read(worksheet="Categories")
+
+    # --- NEW: Load the Junk Tags sheet ---
+    if 'junk_tags' not in st.session_state and st.session_state.gsheets_connected:
+        with st.spinner("Loading junk tag list..."):
+            try:
+                junk_df = conn.read(worksheet="JunkTags")
+                # Assumes your junk tags are in a column named 'tag'
+                if not junk_df.empty and 'tag' in junk_df.columns:
+                    st.session_state.junk_tags = junk_df['tag'].dropna().tolist()
+                else:
+                    st.session_state.junk_tags = []
+            except Exception as e:
+                # Sheet might not exist, which is fine
+                st.sidebar.info("No 'JunkTags' worksheet found. Using defaults.")
+                st.session_state.junk_tags = []
+    # --- END OF NEW JUNK TAG LOGIC ---
+
     # Button to scrape Tagger based on Google Sheet list
     if st.session_state.gsheets_connected:
         if st.sidebar.button("Scrape Tagger for GSheet Cards 🔎"):
             if 'master_categories' in st.session_state and not st.session_state.master_categories.empty:
                 unique_cards = st.session_state.master_categories['name'].dropna().unique().tolist()
+                
+                # --- THIS IS THE FIX ---
+                # Get the junk tag list from session state
+                junk_tags_list = st.session_state.get('junk_tags', [])
+                
                 with st.spinner(f"Scraping Scryfall Tagger for {len(unique_cards)} cards from your GSheet... This can take several minutes."):
-                    tagger_df = scrape_scryfall_tagger(unique_cards)
+                    # Pass the junk list to the function
+                    tagger_df = scrape_scryfall_tagger(unique_cards, junk_tags_list)
+                # --- END OF FIX ---
                 
                 if not tagger_df.empty:
                     st.session_state.imported_tags = tagger_df
@@ -523,30 +551,19 @@ def main():
             else:
                 st.sidebar.warning("Your Google Sheet 'Categories' tab is empty. Add card names to it first.")
 
-    # Load Google Sheets data if connected
-    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
-        with st.spinner("Loading your categories from Google Sheets..."):
-            st.session_state.master_categories = conn.read(worksheet="Categories")
-
-    # ===============================================================
-    # NEW MERGING LOGIC
-    # ===============================================================
+    # Merging logic
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
 
-    # Ensure gsheets_df has the right columns even if empty
     if gsheets_df is None or gsheets_df.empty:
         gsheets_df = pd.DataFrame(columns=['name', 'category'])
-    
-    # Ensure imported_df has the right columns even if empty
     if imported_df is None or imported_df.empty:
         imported_df = pd.DataFrame(columns=['name', 'category'])
 
     if not gsheets_df.empty or not imported_df.empty:
         st.sidebar.info("Combining Imported Tags with your Google Sheet.")
         
-        # Outer merge to get all cards from both sources
         merged_df = pd.merge(
             gsheets_df, 
             imported_df, 
@@ -555,11 +572,9 @@ def main():
             suffixes=('_gsheet', '_imported')
         )
         
-        # Replace NaN with empty strings to make logic easier
         merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
         merged_df['category_imported'] = merged_df['category_imported'].fillna('')
         
-        # Prioritize GSheet, but use imported tag if GSheet is blank
         merged_df['category'] = np.where(
             merged_df['category_gsheet'] != '', 
             merged_df['category_gsheet'], 
@@ -574,11 +589,12 @@ def main():
     elif not imported_df.empty:
         st.sidebar.info("Using Imported Tags as a base.")
         categories_df_master = imported_df
-    # ===============================================================
-    # END OF NEW MERGING LOGIC
-    # ===============================================================
 
     st.sidebar.divider()
+    # ===============================================================
+    # END OF CATEGORY LOGIC
+    # ===============================================================
+
 
     # --- MAIN APP DISPLAY LOGIC ---
     if df_raw is not None:
@@ -660,7 +676,7 @@ def main():
                 with st.spinner("Generating average deck..."):
                     decks_in_range = deck_prices[(deck_prices >= price_range[0]) & (deck_prices <= price_range[1])].index
                     filtered_price_df = df[df['deck_id'].isin(decks_in_range)]
-                    avg_.json.decoder.JSONDecodeErrordeck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.commander_colors)
+                    avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.commander_colors)
                     if avg_deck:
                         st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.commander_colors) if st.session_state.commander_colors else 'None'}")
                         st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
@@ -671,7 +687,7 @@ def main():
                     st.write("Define your deck structure with the constraints below.")
                     template_must_haves = st.text_area("Must-Include Cards (one per line):", key="template_must_haves")
                     
-                    func_categories_list = sorted([cat for cat in df.explode('category')['category'].unique() if cat != 'Uncategorized'])
+                    func_categories_list = sorted([cat for cat in df.explode('category')['category'].unique() if cat != 'UncategorZ$zed'])
                     type_categories_list = sorted(df['type'].unique())
                     
                     constraints = {'functions': {}, 'types': {}}
