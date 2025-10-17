@@ -773,7 +773,7 @@ def main():
                     if co.empty: st.warning("Co-occurrence matrix is empty.")
                     else:
                         title = f'Card Co-occurrence (Top {heatmap_top_n}, excluding {heatmap_exclude_n})'
-                        fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=7Example)
+                        fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=700)
                         st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Synergy Packages")
