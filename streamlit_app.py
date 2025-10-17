@@ -16,6 +16,9 @@ from playwright.sync_api import sync_playwright
 import subprocess
 import sys
 
+import json
+from pathlib import Path
+
 # --- Visualization ---
 import plotly.express as px
 import plotly.graph_objects as go
@@ -304,7 +307,93 @@ def generate_average_deck(df, commander_slug, color_identity):
         decklist.extend(fillers['name'].tolist())
         
     return sorted(decklist)
+def download_file(url, local_path, chunk_size=8192):
+    """Downloads a file from a URL to a local path with a Streamlit progress bar."""
+    try:
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            total_size = int(r.headers.get('content-length', 0))
+            progress_bar = st.progress(0, text=f"Downloading {local_path.name}...")
+            status_text = st.empty()
+            bytes_downloaded = 0
+            with open(local_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    f.write(chunk)
+                    bytes_downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = min(bytes_downloaded / total_size, 1.0)
+                        # Format text to show MB downloaded
+                        status_text.text(f"Downloading {local_path.name}... {bytes_downloaded // 1024**2}MB / {total_size // 1024**2}MB")
+                        progress_bar.progress(progress)
+            status_text.success(f"✅ Download of {local_path.name} complete.")
+            # Keep success message for a moment, then clear
+            time.sleep(2)
+            status_text.empty()
+            progress_bar.empty()
+            return True
+    except requests.RequestException as e:
+        st.error(f"Failed to download {url}. Error: {e}")
+        return False
 
+@st.cache_data(ttl=86400) # Cache data for 24 hours to get daily updates
+def load_scryfall_tagger_data():
+    """
+    Downloads Scryfall Oracle card data (for name-ID mapping) and community
+    tagger data, then merges them to create a name -> category DataFrame.
+    The data is stored locally in a .data directory to avoid re-downloads.
+    """
+    st.toast("Checking for Scryfall data updates...")
+    DATA_DIR = Path(".data")
+    DATA_DIR.mkdir(exist_ok=True)
+    ORACLE_CARDS_PATH = DATA_DIR / "oracle-cards.json"
+    TAGGER_DATA_PATH = DATA_DIR / "card-tags.json"
+
+    # --- Part 1: Get Oracle Cards Data (for name <-> ID mapping) ---
+    if not ORACLE_CARDS_PATH.exists():
+        with st.spinner("Fetching Scryfall bulk data manifest..."):
+            try:
+                bulk_data_url = "https://api.scryfall.com/bulk-data"
+                response = requests.get(bulk_data_url)
+                response.raise_for_status()
+                bulk_data = response.json()
+                oracle_url = next((item['download_uri'] for item in bulk_data['data'] if item['type'] == 'oracle_cards'), None)
+
+                if not oracle_url:
+                    st.error("Could not find 'oracle_cards' download URL in Scryfall bulk data.")
+                    return pd.DataFrame()
+            except (requests.RequestException, json.JSONDecodeError) as e:
+                st.error(f"Failed to fetch Scryfall bulk data manifest: {e}")
+                return pd.DataFrame()
+
+        st.info("Oracle cards data not found locally. Downloading from Scryfall (this may take a minute)...")
+        if not download_file(oracle_url, ORACLE_CARDS_PATH):
+            return pd.DataFrame()
+
+    with st.spinner("Loading Oracle cards data..."):
+        oracle_df = pd.read_json(ORACLE_CARDS_PATH)
+        oracle_df = oracle_df[['id', 'name']]
+
+    # --- Part 2: Get Tagger Data ---
+    TAGGER_URL = "https://raw.githubusercontent.com/scryfall/tagger-data/main/latest/card-tags.json"
+    if not TAGGER_DATA_PATH.exists():
+        st.info("Scryfall Tagger data not found locally. Downloading...")
+        if not download_file(TAGGER_URL, TAGGER_DATA_PATH):
+            return pd.DataFrame()
+
+    with st.spinner("Loading and processing Tagger data..."):
+        with open(TAGGER_DATA_PATH, 'r', encoding='utf-8') as f:
+            tagger_data = json.load(f)
+        
+        tagger_list = [{"id": card_id, "category": "|".join(tags)} for card_id, tags in tagger_data.items()]
+        tagger_df = pd.DataFrame(tagger_list)
+
+    # --- Part 3: Merge and Finalize ---
+    with st.spinner("Merging Scryfall data..."):
+        final_df = pd.merge(oracle_df, tagger_df, on='id', how='inner')
+        final_df = final_df[['name', 'category']].drop_duplicates(subset=['name']).reset_index(drop=True)
+
+    st.toast(f"Loaded {len(final_df)} functional tags from Scryfall!", icon="📚")
+    return final_df
 
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
@@ -320,6 +409,43 @@ def main():
         st.session_state.gsheets_connected = False
         st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
 
+# ===============================================================
+    # NEW: CARD CATEGORY DATA LOADING LOGIC
+    # ===============================================================
+    st.sidebar.header("Card Categories")
+
+    # Button to load Scryfall data into session state
+    if st.sidebar.button("Download/Load Scryfall Community Tags 📚"):
+        with st.spinner("Loading Scryfall data, this may involve a download..."):
+            scryfall_tags_df = load_scryfall_tagger_data()
+            if not scryfall_tags_df.empty:
+                st.session_state.scryfall_tags = scryfall_tags_df
+
+    # Load Google Sheets data if connected
+    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
+        with st.spinner("Loading your categories from Google Sheets..."):
+            st.session_state.master_categories = conn.read(worksheet="Categories")
+
+    # Initialize master DataFrame for categories
+    categories_df_master = pd.DataFrame(columns=['name', 'category'])
+    
+    # Get data from session state
+    scryfall_df = st.session_state.get('scryfall_tags', pd.DataFrame())
+    gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
+
+    # Combine data sources, giving precedence to Google Sheets
+    if not gsheets_df.empty and not scryfall_df.empty:
+        st.sidebar.info("Combining Scryfall tags with your Google Sheet.")
+        categories_df_master = pd.concat([scryfall_df, gsheets_df]).drop_duplicates(subset=['name'], keep='last').sort_values('name').reset_index(drop=True)
+    elif not gsheets_df.empty:
+        st.sidebar.info("Using your categories from Google Sheets.")
+        categories_df_master = gsheets_df
+    elif not scryfall_df.empty:
+        st.sidebar.info("Using Scryfall community tags as a base.")
+        categories_df_master = scryfall_df
+
+    st.sidebar.divider() # Visual separator for clarity
+    
     st.sidebar.header("Data Source")
     df_raw = None
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
