@@ -359,17 +359,22 @@ def import_edhrec_categories():
     return pd.DataFrame(final_data)
 
 @st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
-def scrape_scryfall_tagger(card_names: list):
+def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
     """
     Scrapes the Scryfall Tagger page for a given list of unique card names.
-    Uses the card's set and collector number for a precise URL.
-    Waits for the tag elements themselves to load.
+    Filters the results based on a user-provided list of junk tags.
     """
-    EXCLUDED_TAGS = {
-        'abrade', 'modal', 'single english word name', 'functional reprint',
-        'strictly worse', 'strictly better', 'art', 'flavor text',
-        'cycle-hou-modal-spell'
+    
+    # --- THIS IS THE NEW LOGIC ---
+    # We still keep a few base-level exclusions just in case
+    BASE_EXCLUDED_TAGS = {
+        'abrade', 'modal', 'single english word name'
     }
+    
+    # Add the user's junk tags (lowercased) from the GSheet
+    user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
+    EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
+    # --- END OF NEW LOGIC ---
 
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
@@ -398,33 +403,23 @@ def scrape_scryfall_tagger(card_names: list):
 
                 # Step 2: Scrape the Tagger page
                 page.goto(tagger_url, timeout=30000)
-                
-                # ==========================================================
-                # NEW ROBUST WAITER
-                # Wait for the specific 'a' tag (the link) to appear.
-                # This confirms the dynamic content has loaded.
-                # ==========================================================
                 page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
                 
                 html = page.content()
                 soup = BeautifulSoup(html, "html.parser")
 
-                # Find the 'Card' header (making search flexible with regex)
                 card_header = soup.find('h2', string=re.compile(r'^\s*Card\s*$'))
                 
                 if card_header:
-                    # Find the <div> container that is the *next* element
                     tag_container = card_header.find_next_sibling('div')
                     if tag_container:
-                        # Find all the tags within that specific container
                         tags = tag_container.find_all('a', href=re.compile(r'^/tags/card/'))
                         for tag in tags:
                             tag_text = tag.get_text(strip=True)
+                            # This now checks against your dynamic list
                             if tag_text not in EXCLUDED_TAGS:
                                 card_tags.add(tag_text.replace('-', ' ').capitalize())
-
-                # FALLBACK: If the header logic fails, just find all card tags
-                # on the page. This is less precise but better than nothing.
+                
                 if not card_tags:
                     all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
                     for tag in all_tags:
@@ -438,7 +433,6 @@ def scrape_scryfall_tagger(card_names: list):
                 time.sleep(random.uniform(0.1, 0.25))
 
             except Exception as e:
-                # This will catch timeouts from the wait_for_selector
                 st.warning(f"Could not scrape '{name}'. (Error: {e})")
                 continue
         
@@ -452,7 +446,6 @@ def scrape_scryfall_tagger(card_names: list):
 
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
-
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
 # ===================================================================
