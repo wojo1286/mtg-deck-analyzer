@@ -362,18 +362,12 @@ def import_edhrec_categories():
 def scrape_scryfall_tagger(card_names: list):
     """
     Scrapes the Scryfall Tagger page for a given list of unique card names.
-
-    Args:
-        card_names: A list of unique card names to scrape.
-
-    Returns:
-        A DataFrame with 'name' and 'category' columns.
+    Uses the card's set and collector number for a precise URL.
     """
-    # Define tags you want to ignore. You can easily add to this list.
     EXCLUDED_TAGS = {
         'abrade', 'modal', 'single english word name', 'functional reprint',
         'strictly worse', 'strictly better', 'art', 'flavor text',
-        'cycle-hou-modal-spell' # Add any other non-functional tags here
+        'cycle-hou-modal-spell'
     }
 
     scraped_data = {}
@@ -389,46 +383,45 @@ def scrape_scryfall_tagger(card_names: list):
             card_tags = set()
 
             try:
-                # Step 1: Use Scryfall API to find the exact card and its tagger URL
+                # Step 1: Use Scryfall API to find the exact card data
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?exact={encoded_name}"
                 response = requests.get(api_url)
                 response.raise_for_status()
                 card_data = response.json()
                 
-                # Construct the Tagger URL from the API response
-                tagger_url = card_data['scryfall_uri'].replace("scryfall.com", "tagger.scryfall.com")
+                # ==========================================================
+                # CORRECTED URL CONSTRUCTION
+                # Build the URL from the set code and collector number
+                # ==========================================================
+                set_code = card_data['set']
+                collector_num = card_data['collector_number']
+                tagger_url = f"https://tagger.scryfall.com/card/{set_code}/{collector_num}"
+                # ==========================================================
 
                 # Step 2: Scrape the Tagger page
                 page.goto(tagger_url, timeout=30000)
-                # Wait for the specific section "Card" to be loaded
                 page.wait_for_selector("h2:has-text('Card')", timeout=20000)
                 
                 html = page.content()
                 soup = BeautifulSoup(html, "html.parser")
 
-                # Find the <h2> element with the text "Card"
                 card_header = soup.find('h2', string='Card')
                 if card_header:
-                    # Find the next sibling element which contains the tags
                     tag_container = card_header.find_next_sibling('div')
                     if tag_container:
                         tags = tag_container.find_all('a', class_='card-tag-link')
                         for tag in tags:
                             tag_text = tag.get_text(strip=True)
-                            # Step 3: Filter out excluded tags
                             if tag_text not in EXCLUDED_TAGS:
                                 card_tags.add(tag_text.replace('-', ' ').capitalize())
                 
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
 
-                # Be polite to the servers
                 time.sleep(random.uniform(0.1, 0.25))
 
             except Exception as e:
-                # Silently skip cards that fail (e.g., not found, timeout)
-                # A warning could be added here if desired: st.warning(...)
                 continue
         
         browser.close()
@@ -439,7 +432,6 @@ def scrape_scryfall_tagger(card_names: list):
         st.error("Could not scrape any tags from the Scryfall Tagger.")
         return pd.DataFrame()
 
-    # Convert the dictionary to the required DataFrame format
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
 
