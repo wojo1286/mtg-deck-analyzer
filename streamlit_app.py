@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import subprocess
 import sys
+import urllib.parse
 
 import json
 from pathlib import Path
@@ -357,6 +358,91 @@ def import_edhrec_categories():
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
+@st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
+def scrape_scryfall_tagger(card_names: list):
+    """
+    Scrapes the Scryfall Tagger page for a given list of unique card names.
+
+    Args:
+        card_names: A list of unique card names to scrape.
+
+    Returns:
+        A DataFrame with 'name' and 'category' columns.
+    """
+    # Define tags you want to ignore. You can easily add to this list.
+    EXCLUDED_TAGS = {
+        'abrade', 'modal', 'single english word name', 'functional reprint',
+        'strictly worse', 'strictly better', 'art', 'flavor text',
+        'cycle-hou-modal-spell' # Add any other non-functional tags here
+    }
+
+    scraped_data = {}
+    progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+
+        for i, name in enumerate(card_names):
+            progress_text = f"Scraping '{name}' ({i+1}/{len(card_names)})..."
+            progress_bar.progress((i + 1) / len(card_names), text=progress_text)
+            card_tags = set()
+
+            try:
+                # Step 1: Use Scryfall API to find the exact card and its tagger URL
+                encoded_name = urllib.parse.quote_plus(name)
+                api_url = f"https://api.scryfall.com/cards/named?exact={encoded_name}"
+                response = requests.get(api_url)
+                response.raise_for_status()
+                card_data = response.json()
+                
+                # Construct the Tagger URL from the API response
+                tagger_url = card_data['scryfall_uri'].replace("scryfall.com", "tagger.scryfall.com")
+
+                # Step 2: Scrape the Tagger page
+                page.goto(tagger_url, timeout=30000)
+                # Wait for the specific section "Card" to be loaded
+                page.wait_for_selector("h2:has-text('Card')", timeout=20000)
+                
+                html = page.content()
+                soup = BeautifulSoup(html, "html.parser")
+
+                # Find the <h2> element with the text "Card"
+                card_header = soup.find('h2', string='Card')
+                if card_header:
+                    # Find the next sibling element which contains the tags
+                    tag_container = card_header.find_next_sibling('div')
+                    if tag_container:
+                        tags = tag_container.find_all('a', class_='card-tag-link')
+                        for tag in tags:
+                            tag_text = tag.get_text(strip=True)
+                            # Step 3: Filter out excluded tags
+                            if tag_text not in EXCLUDED_TAGS:
+                                card_tags.add(tag_text.replace('-', ' ').capitalize())
+                
+                if card_tags:
+                    scraped_data[name] = sorted(list(card_tags))
+
+                # Be polite to the servers
+                time.sleep(random.uniform(0.1, 0.25))
+
+            except Exception as e:
+                # Silently skip cards that fail (e.g., not found, timeout)
+                # A warning could be added here if desired: st.warning(...)
+                continue
+        
+        browser.close()
+
+    progress_bar.empty()
+
+    if not scraped_data:
+        st.error("Could not scrape any tags from the Scryfall Tagger.")
+        return pd.DataFrame()
+
+    # Convert the dictionary to the required DataFrame format
+    final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
+    return pd.DataFrame(final_data)
+
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
 # ===================================================================
@@ -371,102 +457,89 @@ def main():
         st.session_state.gsheets_connected = False
         st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
 
+    # Initialize df_raw to None
+    df_raw = None
+
+    # --- DATA SOURCE SELECTION (Moved up to define df_raw earlier) ---
+    st.sidebar.header("Deck Data Source")
+    data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
+    
+    commander_slug_for_tools = "ojer-axonil-deepest-might"
+
+    if data_source_option == "Upload CSV":
+        decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
+        if decklist_file:
+            commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
+            st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
+            df_raw = pd.read_csv(decklist_file)
+            st.session_state.scraped_df = df_raw # Store in session state for consistency
+            
+    elif data_source_option == "Scrape New Data":
+        # UI for scraping options
+        commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
+        deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
+        
+        if st.sidebar.button("🚀 Start Scraping"):
+            with st.spinner("Scraping in progress... this may take several minutes."):
+                # Simplified for clarity, assuming default brackets for now
+                df_scraped, colors = run_scraper(commander_slug, deck_limit)
+                st.session_state.scraped_df = df_scraped
+                st.session_state.commander_colors = colors
+                st.rerun() # Rerun to make the scrape Tagger button appear
+
+        if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
+            df_raw = st.session_state.scraped_df
+            st.sidebar.success("Scraped data is loaded.")
+            commander_slug_for_tools = commander_slug
+
     # ===============================================================
     # CARD CATEGORY DATA LOADING LOGIC
     # ===============================================================
     st.sidebar.header("Card Categories")
 
-    if st.sidebar.button("Import Categories from EDHREC 📋"):
-        # The UI elements are now OUTSIDE the cached function
-        with st.spinner("Importing functional categories from EDHREC... (This may take a moment on the first run)"):
+    if st.sidebar.button("Import Broad Categories from EDHREC 📋"):
+        with st.spinner("Importing functional categories from EDHREC..."):
             edhrec_tags_df = import_edhrec_categories()
-        
         if not edhrec_tags_df.empty:
-            # We use a consistent key in session_state for the imported data
             st.session_state.imported_tags = edhrec_tags_df
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
+            st.rerun()
 
-            st.dataframe(edhrec_tags_df)
-        
-        else:
-            st.error("Failed to import any categories from EDHREC.")
+    if df_raw is not None and not df_raw.empty:
+        if st.sidebar.button("Scrape Tagger for Decklist Cards 🔎"):
+            unique_cards = df_raw['name'].unique().tolist()
+            with st.spinner(f"Scraping Scryfall Tagger for {len(unique_cards)} cards... This can take several minutes."):
+                tagger_df = scrape_scryfall_tagger(unique_cards)
+            
+            if not tagger_df.empty:
+                st.session_state.imported_tags = tagger_df
+                st.toast(f"Scraped tags for {len(tagger_df)} cards!", icon="✅")
+                st.rerun()
 
-    # Load Google Sheets data if connected
     if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading your categories from Google Sheets..."):
             st.session_state.master_categories = conn.read(worksheet="Categories")
 
-    # Initialize master DataFrame for categories
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
-    
-    # Get data from session state
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
 
-    # Combine data sources, giving precedence to Google Sheets
     if not gsheets_df.empty and not imported_df.empty:
-        st.sidebar.info("Combining EDHREC tags with your Google Sheet.")
+        st.sidebar.info("Combining Imported Tags with your Google Sheet.")
         categories_df_master = pd.concat([imported_df, gsheets_df]).drop_duplicates(subset=['name'], keep='last').sort_values('name').reset_index(drop=True)
     elif not gsheets_df.empty:
         st.sidebar.info("Using your categories from Google Sheets.")
         categories_df_master = gsheets_df
     elif not imported_df.empty:
-        st.sidebar.info("Using EDHREC categories as a base.")
+        st.sidebar.info("Using Imported Tags as a base.")
         categories_df_master = imported_df
 
-    st.sidebar.divider() # Visual separator for clarity
-    # ===============================================================
-    # END OF NEW LOGIC
-    # ===============================================================
+    st.sidebar.divider()
 
-    st.sidebar.header("Deck Data Source")
-    df_raw = None
-    
-    if 'commander_colors' not in st.session_state: st.session_state.commander_colors = []
-    
-    data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
-
-    commander_slug_for_tools = "ojer-axonil-deepest-might"
-
-    if data_source_option == "Upload CSV":
-        decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
-        if not st.session_state.gsheets_connected and categories_df_master.empty:
-            categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
-            if categories_file: categories_df_master = pd.read_csv(categories_file)
-        if decklist_file:
-            commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
-            st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
-            df_raw = pd.read_csv(decklist_file)
-            
-    elif data_source_option == "Scrape New Data":
-        commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
-        commander_slug_for_tools = commander_slug
-        
-        bracket_options = { "All Decks": "", "Bracket 1 - Exhibition (Budget)": "exhibition", "Bracket 2 - Core": "core", "Bracket 3 - Upgraded": "upgraded", "Bracket 4 - Optimized": "optimized", "Bracket 5 - cEDH": "cedh" }
-        selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
-        selected_bracket_slug = bracket_options[selected_bracket_name]
-
-        budget_options = {"Any Budget": "", "Budget": "budget", "Expensive": "expensive"}
-        selected_budget_name = st.sidebar.selectbox("Select Budget Option:", options=list(budget_options.keys()))
-        selected_budget_slug = budget_options[selected_budget_name]
-
-        deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 500, 150)
-        if st.sidebar.button("🚀 Start Scraping"):
-            with st.spinner("Scraping in progress... this may take several minutes."):
-                display_bracket_name = selected_bracket_name + (f" ({selected_budget_name})" if selected_budget_name != "Any Budget" else "")
-                df_scraped, colors = run_scraper(commander_slug, deck_limit, selected_bracket_slug, selected_budget_slug, display_bracket_name)
-                st.session_state.scraped_df = df_scraped
-                st.session_state.commander_colors = colors
-
-        if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
-        if st.session_state.scraped_df is not None:
-            df_raw = st.session_state.scraped_df
-            st.sidebar.success("Scraped data is loaded.")
-            if not st.session_state.gsheets_connected and categories_df_master.empty:
-                categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
-                if categories_file: categories_df_master = pd.read_csv(categories_file)
-
+    # --- MAIN APP DISPLAY LOGIC ---
     if df_raw is not None:
+        # (The entire 'if df_raw is not None:' block from your previous code goes here)
+        # ... from clean_and_prepare_data down to the end of the expanders ...
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
@@ -605,7 +678,6 @@ def main():
                 
                 unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
                 
-                # Merge unique cards with the MASTER list for editing
                 editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
                 
                 st.write("Edit categories below (use '|' to separate multiple functions):")
@@ -619,7 +691,6 @@ def main():
                 
                 if st.button("💾 Save Changes to Google Sheet"):
                     with st.spinner("Saving to Google Sheet..."):
-                        # Update the master list in session state first
                         updated_master = pd.concat([
                             st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
                             edited_df
