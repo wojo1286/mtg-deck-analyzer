@@ -487,7 +487,7 @@ def main():
     # ===============================================================
     # CARD CATEGORY DATA LOADING LOGIC
     # ===============================================================
-st.sidebar.header("Card Categories")
+    st.sidebar.header("Card Categories")
 
     # This button for EDHREC is still an option for a quick, broad import
     if st.sidebar.button("Import Broad Categories from EDHREC 📋"):
