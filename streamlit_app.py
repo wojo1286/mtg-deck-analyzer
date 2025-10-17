@@ -507,7 +507,6 @@ def main():
     # ===============================================================
     st.sidebar.header("Card Categories")
 
-    # This button for EDHREC is still an option for a quick, broad import
     if st.sidebar.button("Import Broad Categories from EDHREC 📋"):
         with st.spinner("Importing functional categories from EDHREC..."):
             edhrec_tags_df = import_edhrec_categories()
@@ -515,11 +514,6 @@ def main():
             st.session_state.imported_tags = edhrec_tags_df
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
             st.rerun()
-
-    # Load Google Sheets data if connected
-    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
-        with st.spinner("Loading your categories from Google Sheets..."):
-            st.session_state.master_categories = conn.read(worksheet="Categories")
 
     # NEW: Button to scrape Tagger based on Google Sheet list
     if st.session_state.gsheets_connected:
@@ -536,7 +530,12 @@ def main():
             else:
                 st.sidebar.warning("Your Google Sheet 'Categories' tab is empty. Add card names to it first.")
 
-    # Merging logic (this remains the same)
+    # Load Google Sheets data if connected
+    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
+        with st.spinner("Loading your categories from Google Sheets..."):
+            st.session_state.master_categories = conn.read(worksheet="Categories")
+
+    # Merging logic
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
@@ -552,11 +551,13 @@ def main():
         categories_df_master = imported_df
 
     st.sidebar.divider()
+    # ===============================================================
+    # END OF CATEGORY LOGIC
+    # ===============================================================
+
 
     # --- MAIN APP DISPLAY LOGIC ---
     if df_raw is not None:
-        # (The entire 'if df_raw is not None:' block from your previous code goes here)
-        # ... from clean_and_prepare_data down to the end of the expanders ...
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
@@ -594,16 +595,30 @@ def main():
             curve = spells_df.groupby('cmc').size().reset_index(name='count')
             fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
 
+        # ===============================================================
+        # THIS IS THE CORRECTED BLOCK
+        # ===============================================================
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
             with st.expander("Functional Analysis"):
                 func_df = spells_df.copy()
+                # Handle potential NaN values in 'category' before splitting
+                func_df['category'] = func_df['category'].fillna('Uncategorized')
                 func_df['category_list'] = func_df['category'].str.split('|')
-                func_df = func_df.explode('category_list').loc[lambda d: d['category_list'] != 'Uncategorized']
-                fc1, fc2 = st.columns(2)
-                with fc1:
-                    sunburst_fig = px.sunburst(func_df, path=['category_list'], title='Functional Breakdown'); st.plotly_chart(sunburst_fig, use_container_width=True)
-                with fc2:
-                    box_fig = px.box(func_df, x='category_list', y='cmc', title='CMC Distribution by Function'); st.plotly_chart(box_fig, use_container_width=True)
+                func_df = func_df.explode('category_list').loc[lambda d: (d['category_list'] != 'Uncategorized') & (d['category_list'] != '')]
+                
+                # ADDED CHECK: Only show charts if func_df is not empty
+                if not func_df.empty:
+                    fc1, fc2 = st.columns(2)
+                    with fc1:
+                        sunburst_fig = px.sunburst(func_df, path=['category_list'], title='Functional Breakdown'); st.plotly_chart(sunburst_fig, use_container_width=True)
+                    with fc2:
+                        box_fig = px.box(func_df, x='category_list', y='cmc', title='CMC Distribution by Function'); st.plotly_chart(box_fig, use_container_width=True)
+                else:
+                    # Show a message if there's no data to plot
+                    st.info("No categorized card functions found to display in the analysis.")
+        # ===============================================================
+        # END OF CORRECTION
+        # ===============================================================
 
         with st.expander("Personal Deckbuilding Tools", expanded=True):
             st.subheader("Analyze Your Decklist")
@@ -758,7 +773,7 @@ def main():
                     if co.empty: st.warning("Co-occurrence matrix is empty.")
                     else:
                         title = f'Card Co-occurrence (Top {heatmap_top_n}, excluding {heatmap_exclude_n})'
-                        fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=700)
+                        fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=7Example)
                         st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Synergy Packages")
