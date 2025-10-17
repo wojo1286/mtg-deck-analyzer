@@ -24,6 +24,9 @@ import plotly.graph_objects as go
 from mlxtend.frequent_patterns import apriori
 from sklearn.manifold import TSNE
 
+# --- Google Sheets Connection ---
+from streamlit_gsheets import GSheetsConnection
+
 # --- Page Config ---
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
 
@@ -241,11 +244,9 @@ def generate_average_deck(df, commander_slug, color_identity):
 
     basic_land_names = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']
     
-    # Infer basic land count for each deck
     deck_counts = df.groupby('deck_id').size().reset_index(name='known_cards')
     deck_counts['inferred_basics'] = 100 - deck_counts['known_cards']
 
-    # Calculate averages
     spell_df = df[~df['type'].str.contains('Land', na=False)]
     avg_spell_counts = spell_df.groupby('deck_id')['type'].value_counts().unstack(fill_value=0).mean()
     
@@ -253,12 +254,10 @@ def generate_average_deck(df, commander_slug, color_identity):
     avg_non_basic_count = non_basic_land_df.groupby('deck_id').size().mean() if not non_basic_land_df.empty else 0
     avg_basic_count = deck_counts['inferred_basics'].mean()
 
-    # Combine into a template
     template = avg_spell_counts.round().astype(int)
     template['Non-Basic Land'] = round(avg_non_basic_count)
     template['Basic Land'] = round(avg_basic_count)
 
-    # Normalize to 99 cards
     total_cards = template.sum()
     if total_cards == 0:
         st.warning("Cannot generate average deck: Calculated template is empty."); return None
@@ -267,12 +266,10 @@ def generate_average_deck(df, commander_slug, color_identity):
     diff = 99 - scaled_template.sum()
     if diff != 0 and not scaled_template.empty: scaled_template[scaled_template.idxmax()] += diff
 
-    # Fill the decklist
     commander_name = commander_slug.replace('-', ' ').title()
     decklist = [commander_name]
     used_cards = {commander_name}
 
-    # Fill spell slots
     for card_type, count in scaled_template.items():
         if count <= 0 or 'Land' in card_type: continue
         candidates = df[df['type'] == card_type]
@@ -281,7 +278,6 @@ def generate_average_deck(df, commander_slug, color_identity):
         decklist.extend(top_cards['name'].tolist())
         used_cards.update(top_cards['name'].tolist())
     
-    # Fill non-basic land slot
     num_non_basics = int(scaled_template.get('Non-Basic Land', 0))
     if num_non_basics > 0:
         pop_non_basics = popularity_table(non_basic_land_df)
@@ -289,7 +285,6 @@ def generate_average_deck(df, commander_slug, color_identity):
         decklist.extend(top_lands['name'].tolist())
         used_cards.update(top_lands['name'].tolist())
 
-    # Fill basic land slot
     num_basics = int(scaled_template.get('Basic Land', 0))
     if num_basics > 0:
         basic_land_map = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest'}
@@ -317,10 +312,25 @@ def generate_average_deck(df, commander_slug, color_identity):
 def main():
     st.title("MTG Deckbuilding Analysis Tool")
 
+    # --- Initialize Google Sheets Connection ---
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        st.session_state.gsheets_connected = True
+    except Exception:
+        st.session_state.gsheets_connected = False
+        st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
+
     st.sidebar.header("Data Source")
     df_raw = None
-    categories_df = None
-    if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
+    categories_df_master = pd.DataFrame(columns=['name', 'category'])
+
+    if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
+        with st.spinner("Loading master category list from Google Sheets..."):
+            st.session_state.master_categories = conn.read(worksheet="Categories")
+
+    if st.session_state.gsheets_connected:
+        categories_df_master = st.session_state.master_categories
+    
     if 'commander_colors' not in st.session_state: st.session_state.commander_colors = []
     
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
@@ -329,12 +339,14 @@ def main():
 
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
-        categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
+        if not st.session_state.gsheets_connected:
+            categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
+            if categories_file: categories_df_master = pd.read_csv(categories_file)
         if decklist_file:
             commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
             st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
             df_raw = pd.read_csv(decklist_file)
-            if categories_file: categories_df = pd.read_csv(categories_file)
+            
     elif data_source_option == "Scrape New Data":
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
         commander_slug_for_tools = commander_slug
@@ -355,14 +367,16 @@ def main():
                 st.session_state.scraped_df = df_scraped
                 st.session_state.commander_colors = colors
 
+        if 'scraped_df' not in st.session_state: st.session_state.scraped_df = None
         if st.session_state.scraped_df is not None:
             df_raw = st.session_state.scraped_df
             st.sidebar.success("Scraped data is loaded.")
-            categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
-            if categories_file: categories_df = pd.read_csv(categories_file)
+            if not st.session_state.gsheets_connected:
+                categories_file = st.sidebar.file_uploader("Upload Card Categories CSV (Optional)", type=["csv"])
+                if categories_file: categories_df_master = pd.read_csv(categories_file)
 
     if df_raw is not None:
-        df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df)
+        df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
         st.header("Dashboard & Analysis")
@@ -493,6 +507,38 @@ def main():
                                 st.dataframe(eff_df)
             else:
                 st.warning("Upload a `card_categories.csv` to enable the Deck Template Generator.")
+
+        if st.session_state.gsheets_connected:
+            with st.expander("Card Category Editor", expanded=False):
+                st.info("Here you can add or edit categories for all unique cards found in the current dataset. Changes will be saved to your Google Sheet.")
+                
+                unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
+                
+                editor_df = pd.merge(unique_cards_df, st.session_state.master_categories, on='name', how='left').fillna('')
+                
+                st.write("Edit categories below (use '|' to separate multiple functions):")
+                edited_df = st.data_editor(
+                    editor_df,
+                    key='category_editor',
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                if st.button("💾 Save Changes to Google Sheet"):
+                    with st.spinner("Saving to Google Sheet..."):
+                        updated_master = pd.concat([
+                            st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
+                            edited_df
+                        ]).drop_duplicates(subset=['name'], keep='last')
+                        
+                        updated_master = updated_master[updated_master['name'] != ''].sort_values('name')
+
+                        conn.update(worksheet="Categories", data=updated_master)
+                        st.session_state.master_categories = updated_master
+                        st.success("Categories saved successfully!")
+                        time.sleep(1)
+                        st.rerun()
 
         with st.expander("Advanced Synergy Tools", expanded=False):
             st.subheader("Card Inspector")
