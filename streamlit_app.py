@@ -25,7 +25,7 @@ from mlxtend.frequent_patterns import apriori
 from sklearn.manifold import TSNE
 
 # --- Google Sheets Connection (THE CORRECT IMPORT) ---
-from st-gsheets-connection import GSheetsConnection
+from streamlit_gsheets import GSheetsConnection
 
 # --- Page Config ---
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
