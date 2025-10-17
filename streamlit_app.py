@@ -371,10 +371,16 @@ def load_scryfall_tagger_data():
 
     with st.spinner("Loading Oracle cards data..."):
         oracle_df = pd.read_json(ORACLE_CARDS_PATH)
+        # Handle multi-faced cards by only keeping the first name (e.g., "Animus of Predation // Animus of Predation")
+        oracle_df['name'] = oracle_df['name'].apply(lambda x: x.split(' // ')[0])
         oracle_df = oracle_df[['id', 'name']]
 
     # --- Part 2: Get Tagger Data ---
-    TAGGER_URL = "https://raw.githubusercontent.com/scryfall/tagger-data/main/latest/card-tags.json"
+    #
+    # THIS IS THE CORRECTED URL
+    #
+    TAGGER_URL = "https://raw.githubusercontent.com/scryfall/tagger-data/main/json/card-tags.json"
+    
     if not TAGGER_DATA_PATH.exists():
         st.info("Scryfall Tagger data not found locally. Downloading...")
         if not download_file(TAGGER_URL, TAGGER_DATA_PATH):
