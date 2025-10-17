@@ -385,19 +385,15 @@ def scrape_scryfall_tagger(card_names: list):
             try:
                 # Step 1: Use Scryfall API to find the exact card data
                 encoded_name = urllib.parse.quote_plus(name)
-                api_url = f"https://api.scryfall.com/cards/named?exact={encoded_name}"
+                api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
+                
                 response = requests.get(api_url)
-                response.raise_for_status()
+                response.raise_for_status() # This will raise an error if the card isn't found
                 card_data = response.json()
                 
-                # ==========================================================
-                # CORRECTED URL CONSTRUCTION
-                # Build the URL from the set code and collector number
-                # ==========================================================
                 set_code = card_data['set']
                 collector_num = card_data['collector_number']
                 tagger_url = f"https://tagger.scryfall.com/card/{set_code}/{collector_num}"
-                # ==========================================================
 
                 # Step 2: Scrape the Tagger page
                 page.goto(tagger_url, timeout=30000)
@@ -408,9 +404,15 @@ def scrape_scryfall_tagger(card_names: list):
 
                 card_header = soup.find('h2', string='Card')
                 if card_header:
+                    # Find the next sibling <div> which acts as the container
                     tag_container = card_header.find_next_sibling('div')
                     if tag_container:
-                        tags = tag_container.find_all('a', class_='card-tag-link')
+                        # ==========================================================
+                        # CORRECTED SELECTOR based on your screenshots
+                        # Find all <a> tags whose href starts with /tags/card/
+                        # ==========================================================
+                        tags = tag_container.find_all('a', href=re.compile(r'^/tags/card/'))
+                        
                         for tag in tags:
                             tag_text = tag.get_text(strip=True)
                             if tag_text not in EXCLUDED_TAGS:
@@ -422,6 +424,7 @@ def scrape_scryfall_tagger(card_names: list):
                 time.sleep(random.uniform(0.1, 0.25))
 
             except Exception as e:
+                st.warning(f"Could not scrape '{name}': {e}")
                 continue
         
         browser.close()
