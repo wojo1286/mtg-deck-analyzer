@@ -487,8 +487,9 @@ def main():
     # ===============================================================
     # CARD CATEGORY DATA LOADING LOGIC
     # ===============================================================
-    st.sidebar.header("Card Categories")
+st.sidebar.header("Card Categories")
 
+    # This button for EDHREC is still an option for a quick, broad import
     if st.sidebar.button("Import Broad Categories from EDHREC 📋"):
         with st.spinner("Importing functional categories from EDHREC..."):
             edhrec_tags_df = import_edhrec_categories()
@@ -497,21 +498,27 @@ def main():
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
             st.rerun()
 
-    if df_raw is not None and not df_raw.empty:
-        if st.sidebar.button("Scrape Tagger for Decklist Cards 🔎"):
-            unique_cards = df_raw['name'].unique().tolist()
-            with st.spinner(f"Scraping Scryfall Tagger for {len(unique_cards)} cards... This can take several minutes."):
-                tagger_df = scrape_scryfall_tagger(unique_cards)
-            
-            if not tagger_df.empty:
-                st.session_state.imported_tags = tagger_df
-                st.toast(f"Scraped tags for {len(tagger_df)} cards!", icon="✅")
-                st.rerun()
-
+    # Load Google Sheets data if connected
     if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading your categories from Google Sheets..."):
             st.session_state.master_categories = conn.read(worksheet="Categories")
 
+    # NEW: Button to scrape Tagger based on Google Sheet list
+    if st.session_state.gsheets_connected:
+        if st.sidebar.button("Scrape Tagger for GSheet Cards 🔎"):
+            if 'master_categories' in st.session_state and not st.session_state.master_categories.empty:
+                unique_cards = st.session_state.master_categories['name'].dropna().unique().tolist()
+                with st.spinner(f"Scraping Scryfall Tagger for {len(unique_cards)} cards from your GSheet... This can take several minutes."):
+                    tagger_df = scrape_scryfall_tagger(unique_cards)
+                
+                if not tagger_df.empty:
+                    st.session_state.imported_tags = tagger_df
+                    st.toast(f"Scraped tags for {len(tagger_df)} cards!", icon="✅")
+                    st.rerun()
+            else:
+                st.sidebar.warning("Your Google Sheet 'Categories' tab is empty. Add card names to it first.")
+
+    # Merging logic (this remains the same)
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
