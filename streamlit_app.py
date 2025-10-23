@@ -480,15 +480,29 @@ def main():
     elif data_source_option == "Scrape New Data":
         # UI for scraping options
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
+        
+        # --- NEW: Re-added Bracket and Budget Selection ---
+        bracket_options = {
+            "All Decks": "", "Budget": "budget", "Upgraded": "upgraded", 
+            "Optimized": "optimized", "cEDH": "cedh"
+        }
+        selected_bracket_name = st.sidebar.selectbox(
+            "Select Bracket Level:", options=list(bracket_options.keys())
+        )
+        selected_bracket_slug = bracket_options[selected_bracket_name]
+
         deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
         
         if st.sidebar.button("🚀 Start Scraping"):
             with st.spinner("Scraping in progress... this may take several minutes."):
-                # Assuming default brackets for simplicity, add back if needed
-                df_scraped, colors = run_scraper(commander_slug, deck_limit)
+                df_scraped, colors = run_scraper(
+                    commander_slug, deck_limit, 
+                    bracket_slug=selected_bracket_slug, 
+                    bracket_name=selected_bracket_name
+                )
                 st.session_state.scraped_df = df_scraped
                 st.session_state.commander_colors = colors
-                st.rerun() # Rerun to make the scrape Tagger button appear
+                st.rerun()
 
         if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
             df_raw = st.session_state.scraped_df
@@ -687,30 +701,76 @@ def main():
                     st.write("Define your deck structure with the constraints below.")
                     template_must_haves = st.text_area("Must-Include Cards (one per line):", key="template_must_haves")
                     
-                    func_categories_list = sorted([cat for cat in df.explode('category')['category'].unique() if cat != 'UncategorZ$zed'])
+                    # --- NEW: DYNAMIC CONSTRAINT UI ---
+                    # Initialize session state for constraints if they don't exist
+                    if 'func_constraints' not in st.session_state:
+                        st.session_state.func_constraints = {} # e.g., {'Ramp': (8, 12)}
+                    if 'type_constraints' not in st.session_state:
+                        st.session_state.type_constraints = {} # e.g., {'Creature': (25, 35)}
+
+                    # Prepare clean, individual category lists for dropdowns
+                    all_individual_categories = df['category'].str.split('|').explode()
+                    func_categories_list = sorted([
+                        cat for cat in all_individual_categories.unique() 
+                        if pd.notna(cat) and cat not in ['Uncategorized', '']
+                    ])
                     type_categories_list = sorted(df['type'].unique())
-                    
-                    constraints = {'functions': {}, 'types': {}}
-                    
+
                     with st.expander("Functional Constraints", expanded=True):
-                        for cat in func_categories_list:
-                            col1, col2 = st.columns([1, 3])
-                            is_enabled = col1.checkbox(cat, value=True, key=f"check_{cat}")
-                            if is_enabled:
-                                min_val, max_val = col2.slider("", 0, 40, (8, 12) if cat in ['Ramp', 'Card Draw'] else (0, 10), key=f"slider_{cat}")
-                                constraints['functions'][cat] = {'target': [min_val, max_val], 'current': 0}
+                        # UI to add a new functional constraint
+                        available_funcs = [f for f in func_categories_list if f not in st.session_state.func_constraints]
+                        if available_funcs:
+                            col1, col2 = st.columns([3, 1])
+                            new_func = col1.selectbox("Add functional category:", options=available_funcs, key="new_func_select", index=None, placeholder="Choose a function...")
+                            if col2.button("Add Function", key="add_func_btn") and new_func:
+                                st.session_state.func_constraints[new_func] = (8, 12) if new_func in ['Ramp', 'Card Draw'] else (2, 8)
+                                st.rerun()
+                        else:
+                            st.write("All available functional categories have been added.")
+                        
+                        st.write("---")
+                        # Display and manage existing functional constraints
+                        for func, value in list(st.session_state.func_constraints.items()):
+                            col1, col2, col3 = st.columns([2, 3, 1])
+                            col1.write(f"**{func}**")
+                            # Update the session state directly when the slider changes
+                            st.session_state.func_constraints[func] = col2.slider(f"Range for {func}", 0, 40, value, key=f"slider_func_{func}", label_visibility="collapsed")
+                            if col3.button("🗑️", key=f"del_func_{func}"):
+                                del st.session_state.func_constraints[func]
+                                st.rerun()
 
                     with st.expander("Card Type Constraints"):
-                          for cat in type_categories_list:
-                            col1, col2 = st.columns([1, 3])
-                            is_enabled = col1.checkbox(cat, value=False, key=f"check_type_{cat}")
-                            if is_enabled:
-                                min_val, max_val = col2.slider("", 0, 60, (30, 40) if cat == 'Creature' else (0, 20), key=f"slider_type_{cat}")
-                                constraints['types'][cat] = {'target': [min_val, max_val], 'current': 0}
+                        # UI to add a new type constraint
+                        available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
+                        if available_types:
+                            col1, col2 = st.columns([3, 1])
+                            new_type = col1.selectbox("Add card type:", options=available_types, key="new_type_select", index=None, placeholder="Choose a type...")
+                            if col2.button("Add Type", key="add_type_btn") and new_type:
+                                st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
+                                st.rerun()
+                        else:
+                            st.write("All available card types have been added.")
+
+                        st.write("---")
+                        # Display and manage existing type constraints
+                        for ctype, value in list(st.session_state.type_constraints.items()):
+                            col1, col2, col3 = st.columns([2, 3, 1])
+                            col1.write(f"**{ctype}**")
+                            st.session_state.type_constraints[ctype] = col2.slider(f"Range for {ctype}", 0, 60, value, key=f"slider_type_{ctype}", label_visibility="collapsed")
+                            if col3.button("🗑️", key=f"del_type_{ctype}"):
+                                del st.session_state.type_constraints[ctype]
+                                st.rerun()
                     
                     submitted = st.form_submit_button("📋 Generate Deck With Constraints")
 
                     if submitted:
+                        # Build the constraints dictionary from session state before running the algorithm
+                        constraints = {'functions': {}, 'types': {}}
+                        for func, (min_val, max_val) in st.session_state.func_constraints.items():
+                            constraints['functions'][func] = {'target': [min_val, max_val], 'current': 0}
+                        for ctype, (min_val, max_val) in st.session_state.type_constraints.items():
+                            constraints['types'][ctype] = {'target': [min_val, max_val], 'current': 0}
+
                         with st.spinner("Generating decklists..."):
                             must_haves = parse_decklist(template_must_haves)
                             
