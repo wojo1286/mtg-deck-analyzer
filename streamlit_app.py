@@ -75,6 +75,8 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
     Parses the __NEXT_DATA__ JSON to extract card data robustly.
     """
     cards = []
+    card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
+    
     for card_group in card_lists:
         for card in card_group.get('cardviews', []):
             try:
@@ -82,12 +84,14 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
                 if not name:
                     continue
 
-                ctype = card.get("primary_type")
+                ctype_raw = card.get("primary_type")
+                # Ensure the primary type is one of the known main types
+                ctype = ctype_raw if ctype_raw in card_types else card.get("type", "").split("—")[0].strip()
+
                 cmc = card.get("cmc")
                 
-                # Extract price from nested dictionary, format with '$'
                 price_val = card.get("prices", {}).get("cardkingdom", {}).get("price")
-                price = f"${price_val}" if price_val else None
+                price = f"${price_val}" if price_val is not None else None
 
                 cards.append({
                     "deck_id": deck_id,
@@ -98,7 +102,6 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
                     "price": price
                 })
             except (KeyError, TypeError):
-                # Skip card if data is malformed
                 continue
     return cards
 
@@ -153,8 +156,10 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
             try:
-                page.goto(deck_url, timeout=90000)
-                page.wait_for_selector('button[data-rr-ui-event-key="table"]', timeout=20000)
+                page.goto(deck_url, timeout=90000, wait_until="domcontentloaded")
+                # Wait for the specific data script to be present
+                page.wait_for_selector('script#__NEXT_DATA__', timeout=30000)
+                
                 html = page.content()
 
                 if i == 0:
@@ -162,7 +167,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
 
                 soup = BeautifulSoup(html, "html.parser")
                 
-                # --- NEW: Extract data directly from the JSON script tag ---
                 script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
                 if not script_tag:
                     st.warning(f"Could not find data script for {deck_url}. Skipping.")
@@ -170,6 +174,9 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 
                 json_data = json.loads(script_tag.string)
                 card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("cardlists", [])
+                if not card_lists:
+                    # Fallback for pages that might render differently
+                    card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("container", {}).get("json_dict", {}).get("cardlists", [])
 
                 src_el = soup.find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
@@ -191,6 +198,8 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
+
+# ... (The rest of the script from the previous version remains exactly the same) ...
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -549,6 +558,7 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
         st.header("Dashboard & Analysis")
+        # ... (rest of main() is unchanged)
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -800,7 +810,6 @@ def main():
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
     
-    # --- DEBUGGING: Display the captured HTML ---
     if 'debug_html' in st.session_state and st.session_state.debug_html != "No HTML captured yet.":
         with st.expander("Scraped Page HTML for Debugging"):
             st.code(st.session_state.debug_html)
