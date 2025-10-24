@@ -317,75 +317,88 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 page.goto(deck_url, timeout=90000)
 
                 # --- STEP 1: Click the 'Table' tab ---
+                st.write(f"[{i+1}] Clicking 'Table' tab...")
                 page.click('button[data-rr-ui-event-key="table"]')
                 page.wait_for_selector("div[class*='TableView_table']", timeout=10000)
+                st.write(f"[{i+1}] ...Table tab is visible.")
 
-                # --- STEP 2: Click 'Card Filters' to open dropdown ---
+                # --- STEP 2: Click 'Edit Columns' to open dropdown ---
+                st.write(f"[{i+1}] Clicking 'Edit Columns'...")
                 try:
-                    page.click('button:has-text("Card Filters")', timeout=5000)
+                    # This is the NEW, CORRECT button to click
+                    page.click('button:has-text("Edit Columns")', timeout=5000)
                     page.wait_for_selector('div[class*="dropdown-menu show"]', timeout=5000)
+                    st.write(f"[{i+1}] ...'Edit Columns' dropdown is open.")
                 except Exception as e:
-                    # --- DEBUGGING STEP FOR 'Card Filters' ---
-                    st.error(f"Could not open 'Card Filters' for {deck_url}. Error: {e}")
+                    # --- DEBUGGING STEP FOR 'Edit Columns' ---
+                    st.error(f"Could not open 'Edit Columns' for {deck_url}. Error: {e}")
                     
-                    # Take screenshot at the moment of failure
-                    screenshot_path = "debug_filters_fail.png"
+                    screenshot_path = "debug_edit_columns_fail.png"
                     page.screenshot(path=screenshot_path)
-                    st.image(screenshot_path, caption=f"DEBUG: Failed to find 'Card Filters' on {deck_url}")
-
-                    # Save HTML
-                    html_file_path = "debug_filters_fail.html"
-                    with open(html_file_path, "w", encoding="utf-8") as f:
-                        f.write(page.content())
-                    st.info(f"📄 Raw HTML saved to '{html_file_path}'. Inspect this file to see why the button wasn't found.")
+                    st.image(screenshot_path, caption=f"DEBUG: Failed to find 'Edit Columns' on {deck_url}")
                     
-                    st.warning("Stopping app for debugging. Check screenshot and HTML file.")
+                    st.warning("Stopping app for debugging. Check screenshot.")
                     st.stop()
                     # --- END DEBUGGING ---
 
                 # --- STEP 3: Click the 'Type' checkbox ---
+                st.write(f"[{i+1}] Clicking 'Type' in dropdown...")
                 try:
-                    type_button_selector = 'div[class*="dropdown-menu show"] button:has(span:text-is("Type"))'
-                    is_type_disabled = page.is_visible(f'{type_button_selector}:has(span:text-is("X"))')
+                    # Selector for the button in the menu that contains the text "Type"
+                    type_button_selector = 'div[class*="dropdown-menu show"] button:has-text("Type")'
                     
-                    if is_type_disabled:
-                        page.click(type_button_selector, timeout=5000)
+                    # We just click it. We assume it's off by default.
+                    page.click(type_button_selector, timeout=5000)
+                    st.write(f"[{i+1}] ...Clicked 'Type'.")
                     
+                    # Click *outside* the dropdown to close it (e.g., on a main header)
                     page.click('h2:has-text("Creature")', timeout=5000) 
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(1000) # IMPORTANT: Wait for table to re-render
+                    st.write(f"[{i+1}] ...Table should be updating.")
                 
                 except Exception as e:
                     # --- DEBUGGING STEP FOR 'Type' CLICK ---
                     st.error(f"Could not click 'Type' checkbox for {deck_url}. Error: {e}")
                     
-                    # Take screenshot at the moment of failure
                     screenshot_path = "debug_type_click_fail.png"
                     page.screenshot(path=screenshot_path)
-                    st.image(screenshot_path, caption=f"DEBUG: Failed to click 'Type' checkbox on {deck_url}")
+                    st.image(screenshot_path, caption=f"DEBUG: 'Edit Columns' menu open, but failed to click 'Type' on {deck_url}")
                     
                     st.warning("Stopping app for debugging. Check screenshot.")
                     st.stop()
                     # --- END DEBUGGING ---
 
                 # --- STEP 4: Wait for the *final* table with all data ---
+                st.write(f"[{i+1}] Waiting for final table...")
                 try:
                     page.wait_for_selector("table tbody tr a[href*='cards.edhrec.com']", timeout=20000)
                 except Exception as e:
                     st.warning(f"Final table data did not load for {deck_url}. Skipping. Error: {e}")
                     continue
 
-                # --- STEP 5: Parse the table ---
+                # --- STEP 5: Parse the table (and stop for debug) ---
+                st.write(f"[{i+1}] Parsing table...")
                 html = page.content()
+                
+                # Take final screenshot
+                screenshot_path = "debug_final_view.png"
+                page.screenshot(path=screenshot_path)
+                st.image(screenshot_path, caption=f"DEBUG: Final view for {deck_url}. 'Type' column should be visible.")
+
+                # Parse and show first card
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 cards = parse_table(html, deck_id, deck_source)
 
-                if cards: 
-                    all_cards.extend(cards)
+                if cards:
+                    st.subheader("Data from first parsed card:")
+                    st.json(cards[0])
+                    st.info(f"Successfully parsed {len(cards)} cards.")
                 else:
-                    st.warning(f"No cards parsed for {deck_url}, though page loaded and filters applied.")
-                        
-                time.sleep(random.uniform(0.5, 1.5))
+                    st.error("No cards were parsed from the HTML.")
+                
+                st.warning("Debugging enabled. Stopping app after one deck. Check the files and data above.")
+                st.stop() # Stop after the first successful deck
                 
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
