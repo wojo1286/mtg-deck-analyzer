@@ -12,6 +12,9 @@ from copy import deepcopy
 import time
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+import subprocess
+import sys
 import urllib.parse
 import json
 from pathlib import Path
@@ -31,13 +34,36 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
 
 # ===================================================================
-# 2. DATA SCRAPING & PROCESSING FUNCTIONS
+# 2. PLAYWRIGHT INSTALLATION (RUNS ONCE PER CONTAINER START)
+# ===================================================================
+@st.cache_resource
+def setup_playwright():
+    """Installs Playwright's browser binary. This is cached to run only once."""
+    st.write("Verifying and (if needed) installing Playwright dependencies...")
+    try:
+        command = [sys.executable, "-m", "playwright", "install", "chromium"]
+        with st.spinner("Installing Chromium browser (this may take a moment on the first run)..."):
+            process = subprocess.run(
+                command, capture_output=True, text=True, check=True, timeout=600
+            )
+        st.success("Playwright environment is ready!")
+        with st.expander("Show installation logs"):
+            st.code(process.stdout)
+    except Exception as e:
+        st.error("Failed to install Playwright dependencies. The application cannot continue.")
+        st.error(f"Error: {e}")
+        st.stop()
+    return True
+
+# This line executes the setup function.
+setup_complete = setup_playwright()
+
+# ===================================================================
+# 3. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
 def parse_card_data_from_json(card_lists, deck_id, deck_source):
-    """
-    Parses the __NEXT_DATA__ JSON to extract card data robustly.
-    """
+    """Parses the __NEXT_DATA__ JSON to extract card data robustly."""
     cards = []
     card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
     
@@ -47,12 +73,10 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
     for card_group in card_lists:
         if not isinstance(card_group, dict) or 'cardviews' not in card_group:
             continue
-
         for card in card_group.get('cardviews', []):
             try:
                 name = card.get("name")
-                if not name:
-                    continue
+                if not name: continue
 
                 ctype_raw = card.get("primary_type")
                 ctype = ctype_raw if ctype_raw in card_types else card.get("type", "").split("—")[0].strip()
@@ -111,15 +135,17 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     status_text = st.empty()
     st.session_state.debug_html = "No HTML captured yet."
 
-    with requests.Session() as session:
-        session.headers.update(headers)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
         for i, row in df_meta.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
             try:
-                response = session.get(deck_url, timeout=30)
-                response.raise_for_status()
-                html = response.text
+                page.goto(deck_url, timeout=90000, wait_until="domcontentloaded")
+                page.wait_for_selector('script#__NEXT_DATA__', timeout=30000)
+                
+                html = page.content()
 
                 if i == 0: st.session_state.debug_html = html
 
@@ -143,16 +169,15 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 else:
                     st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                 
-                # Re-introduced a moderate, randomized delay to avoid being rate-limited
                 time.sleep(random.uniform(0.4, 0.8))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
             progress_bar.progress((i + 1) / len(df_meta))
+        browser.close()
     
     if not all_cards: 
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
-
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -342,56 +367,54 @@ def import_edhrec_categories():
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
-@st.cache_data(ttl=2592000)
+@st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
 def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
-    """Scrapes Scryfall Tagger without Playwright for speed and reliability."""
-    BASE_EXCLUDED_TAGS = {'abrade', 'modal', 'single english word name'}
+    BASE_EXCLUDED_TAGS = { 'abrade', 'modal', 'single english word name' }
     user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
     EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
 
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+
         for i, name in enumerate(card_names):
-            progress_text = f"Scraping Tagger for '{name}' ({i+1}/{len(card_names)})..."
+            progress_text = f"Scraping '{name}' ({i+1}/{len(card_names)})..."
             progress_bar.progress((i + 1) / len(card_names), text=progress_text)
-            
+            card_tags = set()
             try:
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
-                response = session.get(api_url)
-                response.raise_for_status()
+                response = requests.get(api_url)
+                response.raise_for_status() 
                 card_data = response.json()
-
+                
                 tagger_url = card_data.get('scryfall_uri', '').replace('scryfall.com', 'tagger.scryfall.com')
                 if not tagger_url: continue
-
-                response = session.get(tagger_url, timeout=20)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, "lxml")
                 
-                card_tags = set()
-                tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
-                for tag in tags:
+                page.goto(tagger_url, timeout=30000)
+                page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
+                html = page.content()
+                soup = BeautifulSoup(html, "lxml")
+                
+                all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
+                for tag in all_tags:
                     tag_text = tag.get_text(strip=True)
                     if tag_text not in EXCLUDED_TAGS:
                         card_tags.add(tag_text.replace('-', ' ').capitalize())
                 
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
-                
-                time.sleep(random.uniform(0.1, 0.2))
-
+                time.sleep(random.uniform(0.1, 0.25))
             except Exception as e:
                 st.warning(f"Could not scrape Tagger for '{name}'. (Error: {e})")
                 continue
-    
+        browser.close()
     progress_bar.empty()
     if not scraped_data:
         st.error("Could not scrape any tags from the Scryfall Tagger.")
         return pd.DataFrame()
-
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
 
@@ -606,6 +629,7 @@ def main():
             if FUNCTIONAL_ANALYSIS_ENABLED:
                 st.write("Configure and generate a deck template based on card roles and types.")
                 
+                # FIX: Moved Add buttons outside of any form
                 if 'func_constraints' not in st.session_state: st.session_state.func_constraints = {}
                 if 'type_constraints' not in st.session_state: st.session_state.type_constraints = {}
 
@@ -783,11 +807,10 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
-    
+
     if 'debug_html' in st.session_state:
         with st.expander("Scraped Page HTML for Debugging"):
             st.code(st.session_state.debug_html)
 
 if __name__ == "__main__":
-    if setup_complete:
-        main()
+    main()
