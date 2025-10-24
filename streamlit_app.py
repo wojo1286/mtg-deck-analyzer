@@ -358,7 +358,11 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error(f"No decks found for '{commander_slug}' in '{bracket_name}'."); return None, []
 
     df_meta = pd.json_normalize(decks).head(deck_limit)
-    df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https.edhrec.com/deckpreview/{x}")
+    
+    # --- THIS IS THE FIX ---
+    df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https://edhrec.com/deckpreview/{x}")
+    # --- END FIX ---
+    
     st.success(f"Found {len(decks)} decks. Scraping the first {len(df_meta)}.")
 
     all_cards = []
@@ -399,8 +403,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
-                
-                # This function will now print debug info and stop
                 cards = parse_table(html, deck_id, deck_source) 
 
                 if cards: 
@@ -413,7 +415,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
             
             finally:
                 # This sleep will ALWAYS run, fixing the "too fast" issue
-                time.sleep(random.uniform(1.0, 2.0)) # Increased sleep time
+                time.sleep(random.uniform(0.5, 1.5))
             
             progress_bar.progress((i + 1) / len(df_meta))
         
