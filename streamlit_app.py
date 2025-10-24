@@ -322,54 +322,41 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 page.wait_for_selector("div[class*='TableView_table']", timeout=10000)
                 st.write(f"[{i+1}] ...Table tab is visible.")
 
-                # --- STEP 2: Click 'Edit Columns' to open dropdown ---
-                st.write(f"[{i+1}] Clicking 'Edit Columns'...")
-                try:
-                    # This is the NEW, CORRECT button to click
-                    page.click('button:has-text("Edit Columns")', timeout=5000)
-                    page.wait_for_selector('div[class*="dropdown-menu show"]', timeout=5000)
-                    st.write(f"[{i+1}] ...'Edit Columns' dropdown is open.")
-                except Exception as e:
-                    # --- DEBUGGING STEP FOR 'Edit Columns' ---
-                    st.error(f"Could not open 'Edit Columns' for {deck_url}. Error: {e}")
-                    
-                    screenshot_path = "debug_edit_columns_fail.png"
-                    page.screenshot(path=screenshot_path)
-                    st.image(screenshot_path, caption=f"DEBUG: Failed to find 'Edit Columns' on {deck_url}")
-                    
-                    st.warning("Stopping app for debugging. Check screenshot.")
-                    st.stop()
-                    # --- END DEBUGGING ---
+                # --- STEP 2: Check if 'Type' column is already visible ---
+                st.write(f"[{i+1}] Checking for 'Type' column header...")
+                type_header_selector = 'th:has-text("Type")'
+                is_type_visible = page.is_visible(type_header_selector)
 
-                # --- STEP 3: Click the 'Type' checkbox ---
-                st.write(f"[{i+1}] Clicking 'Type' in dropdown...")
-                try:
-                    # Selector for the button in the menu that contains the text "Type"
-                    type_button_selector = 'div[class*="dropdown-menu show"] button:has-text("Type")'
-                    
-                    # We just click it. We assume it's off by default.
-                    page.click(type_button_selector, timeout=5000)
-                    st.write(f"[{i+1}] ...Clicked 'Type'.")
-                    
-                    # Click *outside* the dropdown to close it (e.g., on a main header)
-                    page.click('h2:has-text("Creature")', timeout=5000) 
-                    page.wait_for_timeout(1000) # IMPORTANT: Wait for table to re-render
-                    st.write(f"[{i+1}] ...Table should be updating.")
-                
-                except Exception as e:
-                    # --- DEBUGGING STEP FOR 'Type' CLICK ---
-                    st.error(f"Could not click 'Type' checkbox for {deck_url}. Error: {e}")
-                    
-                    screenshot_path = "debug_type_click_fail.png"
-                    page.screenshot(path=screenshot_path)
-                    st.image(screenshot_path, caption=f"DEBUG: 'Edit Columns' menu open, but failed to click 'Type' on {deck_url}")
-                    
-                    st.warning("Stopping app for debugging. Check screenshot.")
-                    st.stop()
-                    # --- END DEBUGGING ---
+                # --- STEP 3: If 'Type' is NOT visible, enable it ---
+                if not is_type_visible:
+                    st.write(f"[{i+1}] ...'Type' column not found. Clicking 'Edit Columns'...")
+                    try:
+                        # Click 'Edit Columns' to open dropdown
+                        page.click('button:has-text("Edit Columns")', timeout=5000)
+                        page.wait_for_selector('div[class*="dropdown-menu show"]', timeout=5000)
+                        st.write(f"[{i+1}] ...'Edit Columns' dropdown is open.")
 
-                # --- STEP 4: Wait for the *final* table with all data ---
-                st.write(f"[{i+1}] Waiting for final table...")
+                        # Click the 'Type' button inside the dropdown
+                        type_button_selector = 'div[class*="dropdown-menu show"] button:has-text("Type")'
+                        page.click(type_button_selector, timeout=5000)
+                        st.write(f"[{i+1}] ...Clicked 'Type'. Dropdown will close automatically.")
+                        
+                        # Wait for the table to re-render
+                        page.wait_for_timeout(1000) 
+                        st.write(f"[{i+1}] ...Table should be updating.")
+                    
+                    except Exception as e:
+                        st.error(f"Could not enable 'Type' column for {deck_url}. Error: {e}")
+                        screenshot_path = "debug_enable_type_fail.png"
+                        page.screenshot(path=screenshot_path)
+                        st.image(screenshot_path, caption=f"DEBUG: Failed to click 'Edit Columns' or 'Type' on {deck_url}")
+                        st.warning("Stopping app for debugging. Check screenshot.")
+                        st.stop()
+                else:
+                    st.write(f"[{i+1}] ...'Type' column is already visible. Skipping clicks.")
+
+                # --- STEP 4: Wait for the *final* table data to load ---
+                st.write(f"[{i+1}] Waiting for final table data...")
                 try:
                     page.wait_for_selector("table tbody tr a[href*='cards.edhrec.com']", timeout=20000)
                 except Exception as e:
@@ -380,12 +367,10 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 st.write(f"[{i+1}] Parsing table...")
                 html = page.content()
                 
-                # Take final screenshot
                 screenshot_path = "debug_final_view.png"
                 page.screenshot(path=screenshot_path)
-                st.image(screenshot_path, caption=f"DEBUG: Final view for {deck_url}. 'Type' column should be visible.")
+                st.image(screenshot_path, caption=f"DEBUG: Final view for {deck_D}. 'Type' column should be visible.")
 
-                # Parse and show first card
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 cards = parse_table(html, deck_id, deck_source)
