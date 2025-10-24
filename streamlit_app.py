@@ -206,7 +206,6 @@ def parse_table(html, deck_id, deck_source):
         rows = table.find_all("tr")
         data_rows = rows[1:] if has_header else rows
 
-        # *** BUG 2: Corrected duplicate loop to use `data_rows` ***
         for tr in data_rows:
             tds = tr.find_all("td")
             if not tds:
@@ -222,9 +221,27 @@ def parse_table(html, deck_id, deck_source):
                 cmc_el = tr.find("span", class_="float-right")
                 cmc = cmc_el.get_text(strip=True) if cmc_el else None
 
-            ctype = _extract_type_from_row(tr, tds, type_idx)
-            
-            # *** BUG 3: Removed 16 lines of code that overwrote `ctype` ***
+            # -----------------------------------------------------------------
+            # CORRECTED LOGIC:
+            # This block now correctly uses the 'type_idx' to find the
+            # raw_type string and then parses it.
+            # -----------------------------------------------------------------
+            raw_type = None
+            if type_idx is not None and len(tds) > type_idx:
+                # This is the primary, most reliable method
+                raw_type = tds[type_idx].get_text(strip=True)
+            else:
+                # This is a fallback in case the 'type' header wasn't found
+                raw_type = next(
+                    (
+                        td.get_text(strip=True)
+                        for td in tds
+                        if _extract_primary_type(td.get_text(strip=True)) is not None
+                    ),
+                    None,
+                )
+            ctype = _extract_primary_type(raw_type)
+            # -----------------------------------------------------------------
 
             price = None
             if price_idx is not None and len(tds) > price_idx:
