@@ -70,25 +70,88 @@ setup_complete = setup_playwright()
 # 3. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
+TYPE_KEYWORDS = [
+    "Creature", "Instant", "Sorcery", "Artifact", "Enchantment",
+    "Planeswalker", "Land", "Battle"
+]
+
+
+def _extract_primary_type(text: str | None) -> str | None:
+    if not text:
+        return None
+    cleaned = text.strip()
+    lowered = cleaned.lower()
+    for keyword in TYPE_KEYWORDS:
+        if keyword.lower() in lowered:
+            return keyword
+    return cleaned if cleaned else None
+
+
 def parse_table(html, deck_id, deck_source):
     soup = BeautifulSoup(html, "html.parser")
     cards = []
     for table in soup.find_all("table"):
+        header_row = table.find("tr")
+        header_cells = header_row.find_all(["th", "td"]) if header_row else []
+        type_idx = price_idx = cmc_idx = None
+        for idx, cell in enumerate(header_cells):
+            header_text = cell.get_text(strip=True).lower()
+            if "type" in header_text:
+                type_idx = idx
+            elif "price" in header_text:
+                price_idx = idx
+            elif "cmc" in header_text or "cost" in header_text:
+                cmc_idx = idx
+
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
-            if len(tds) < 5:
+            if not tds:
                 continue
+
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
-            cmc_el = tr.find("span", class_="float-right")
-            cmc = cmc_el.get_text(strip=True) if cmc_el else None
-            ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]), None)
-            price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
+
+            cmc = None
+            if cmc_idx is not None and len(tds) > cmc_idx:
+                cmc = tds[cmc_idx].get_text(strip=True)
+            else:
+                cmc_el = tr.find("span", class_="float-right")
+                cmc = cmc_el.get_text(strip=True) if cmc_el else None
+
+            raw_type = None
+            if type_idx is not None and len(tds) > type_idx:
+                raw_type = tds[type_idx].get_text(strip=True)
+            else:
+                raw_type = next(
+                    (
+                        td.get_text(strip=True)
+                        for td in tds
+                        if _extract_primary_type(td.get_text(strip=True)) is not None
+                    ),
+                    None,
+                )
+            ctype = _extract_primary_type(raw_type)
+
+            price = None
+            if price_idx is not None and len(tds) > price_idx:
+                price = tds[price_idx].get_text(strip=True)
+            else:
+                price = next(
+                    (td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")),
+                    None,
+                )
+
             if name:
-                cards.append({
-                    "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
-                    "name": name, "type": ctype, "price": price
-                })
+                cards.append(
+                    {
+                        "deck_id": deck_id,
+                        "deck_source": deck_source,
+                        "cmc": cmc,
+                        "name": name,
+                        "type": ctype,
+                        "price": price,
+                    }
+                )
     return cards
 
 @st.cache_data
