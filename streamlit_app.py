@@ -699,12 +699,24 @@ def main():
         keys_to_clear = [
             'scraped_df', 'commander_colors', 'master_categories', 'junk_tags',
             'imported_tags', 'func_constraints', 'type_constraints'
+            # Add any other custom session state keys if you have them
         ]
+        st.sidebar.write("Clearing session state keys...") # User feedback
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
-        st.success("All data cleared!")
-        time.sleep(1)
+        
+        # --- ADD THIS LINE TO CLEAR THE CACHE ---
+        st.sidebar.write("Clearing application data cache...") # User feedback
+        st.cache_data.clear()
+        # --- END ADDITION ---
+        
+        # Optional: Clear resource cache if needed (e.g., if playwright state gets stuck)
+        # st.cache_resource.clear() 
+        # st.sidebar.write("Clearing application resource cache...")
+
+        st.success("All session data and caches cleared!")
+        time.sleep(1) # Allow user to see the success message
         st.rerun()
 
     # ===============================================================
