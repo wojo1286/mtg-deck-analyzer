@@ -157,7 +157,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
             try:
                 page.goto(deck_url, timeout=90000, wait_until="domcontentloaded")
-                # Wait for the specific data script to be present
                 page.wait_for_selector('script#__NEXT_DATA__', timeout=30000)
                 
                 html = page.content()
@@ -175,7 +174,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 json_data = json.loads(script_tag.string)
                 card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("cardlists", [])
                 if not card_lists:
-                    # Fallback for pages that might render differently
                     card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("container", {}).get("json_dict", {}).get("cardlists", [])
 
                 src_el = soup.find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
@@ -188,7 +186,8 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 else:
                     st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                         
-                time.sleep(random.uniform(0.5, 1.5))
+                # Reduced delay for faster scraping
+                time.sleep(random.uniform(0.2, 0.5))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
             progress_bar.progress((i + 1) / len(df_meta))
@@ -198,8 +197,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
-
-# ... (The rest of the script from the previous version remains exactly the same) ...
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -342,6 +339,7 @@ def generate_average_deck(df, commander_slug, color_identity):
         decklist.extend(fillers['name'].tolist())
         
     return sorted(decklist)
+
 @st.cache_data(ttl=604800) # Cache for 7 days
 def import_edhrec_categories():
     commander_slugs = [
@@ -558,7 +556,6 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
         st.header("Dashboard & Analysis")
-        # ... (rest of main() is unchanged)
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -809,10 +806,6 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
-    
-    if 'debug_html' in st.session_state and st.session_state.debug_html != "No HTML captured yet.":
-        with st.expander("Scraped Page HTML for Debugging"):
-            st.code(st.session_state.debug_html)
 
 if __name__ == "__main__":
     if setup_complete:
