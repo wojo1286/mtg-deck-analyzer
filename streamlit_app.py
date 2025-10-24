@@ -12,11 +12,7 @@ from copy import deepcopy
 import time
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-import subprocess
-import sys
 import urllib.parse
-
 import json
 from pathlib import Path
 
@@ -28,46 +24,14 @@ import plotly.graph_objects as go
 from mlxtend.frequent_patterns import apriori
 from sklearn.manifold import TSNE
 
-# --- Google Sheets Connection (THE CORRECT IMPORT) ---
+# --- Google Sheets Connection ---
 from streamlit_gsheets import GSheetsConnection
 
 # --- Page Config ---
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
 
 # ===================================================================
-# 2. PLAYWRIGHT INSTALLATION (RUNS ONCE PER CONTAINER START)
-# ===================================================================
-@st.cache_resource
-def setup_playwright():
-    """
-    Installs Playwright's browser binary. This is cached to run only once.
-    """
-    st.write("Verifying and (if needed) installing Playwright dependencies...")
-    try:
-        command = [sys.executable, "-m", "playwright", "install", "chromium"]
-        with st.spinner("Installing Chromium browser (this may take a moment on the first run)..."):
-            process = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=600  # Set a 10-minute timeout for the installation
-            )
-        st.success("Playwright environment is ready!")
-        with st.expander("Show installation logs"):
-            st.code(process.stdout)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-        st.error("Failed to install Playwright dependencies. The application cannot continue.")
-        st.error(f"Error: {e}")
-        st.code(e.stderr if hasattr(e, 'stderr') else "No stderr output.")
-        st.stop()
-    return True
-
-# This line executes the setup function.
-setup_complete = setup_playwright()
-
-# ===================================================================
-# 3. DATA SCRAPING & PROCESSING FUNCTIONS
+# 2. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
 def parse_card_data_from_json(card_lists, deck_id, deck_source):
@@ -77,7 +41,14 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
     cards = []
     card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
     
+    if not card_lists:
+        return []
+
     for card_group in card_lists:
+        # Ensure card_group is a dictionary and has 'cardviews'
+        if not isinstance(card_group, dict) or 'cardviews' not in card_group:
+            continue
+
         for card in card_group.get('cardviews', []):
             try:
                 name = card.get("name")
@@ -85,11 +56,8 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
                     continue
 
                 ctype_raw = card.get("primary_type")
-                # Ensure the primary type is one of the known main types
                 ctype = ctype_raw if ctype_raw in card_types else card.get("type", "").split("—")[0].strip()
-
                 cmc = card.get("cmc")
-                
                 price_val = card.get("prices", {}).get("cardkingdom", {}).get("price")
                 price = f"${price_val}" if price_val is not None else None
 
@@ -101,7 +69,8 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
                     "type": ctype,
                     "price": price
                 })
-            except (KeyError, TypeError):
+            except (KeyError, TypeError, AttributeError):
+                # Skip malformed card entries
                 continue
     return cards
 
@@ -114,7 +83,7 @@ def get_commander_color_identity(commander_slug):
         response.raise_for_status()
         data = response.json()
         return data.get("container", {}).get("json_dict", {}).get("card", {}).get("color_identity", [])
-    except (requests.RequestException, KeyError, IndexError):
+    except (requests.RequestException, KeyError, IndexError, json.JSONDecodeError):
         return []
 
 def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bracket_name="All Decks"):
@@ -146,36 +115,30 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     all_cards = []
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
     st.session_state.debug_html = "No HTML captured yet."
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page()
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
         for i, row in df_meta.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
             try:
-                page.goto(deck_url, timeout=90000, wait_until="domcontentloaded")
-                page.wait_for_selector('script#__NEXT_DATA__', timeout=30000)
-                
-                html = page.content()
+                response = session.get(deck_url, timeout=30)
+                response.raise_for_status()
+                html = response.text
 
-                if i == 0:
-                    st.session_state.debug_html = html
+                if i == 0: st.session_state.debug_html = html
 
                 soup = BeautifulSoup(html, "html.parser")
-                
                 script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+                
                 if not script_tag:
                     st.warning(f"Could not find data script for {deck_url}. Skipping.")
                     continue
                 
                 json_data = json.loads(script_tag.string)
                 card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("cardlists", [])
-                if not card_lists:
-                    card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("container", {}).get("json_dict", {}).get("cardlists", [])
-
+                
                 src_el = soup.find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 
@@ -186,17 +149,16 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 else:
                     st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                         
-                # Reduced delay for faster scraping
-                time.sleep(random.uniform(0.2, 0.5))
+                time.sleep(random.uniform(0.1, 0.25)) # A small, fast delay
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
             progress_bar.progress((i + 1) / len(df_meta))
-        browser.close()
     
     if not all_cards: 
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
+# ... (The rest of the script remains exactly the same) ...
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -383,61 +345,56 @@ def import_edhrec_categories():
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
-@st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
+# This function no longer needs playwright, simplifying it
+@st.cache_data(ttl=2592000)
 def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
-    BASE_EXCLUDED_TAGS = { 'abrade', 'modal', 'single english word name' }
+    BASE_EXCLUDED_TAGS = {'abrade', 'modal', 'single english word name'}
     user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
     EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page()
-
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
         for i, name in enumerate(card_names):
-            progress_text = f"Scraping '{name}' ({i+1}/{len(card_names)})..."
+            progress_text = f"Scraping Tagger for '{name}' ({i+1}/{len(card_names)})..."
             progress_bar.progress((i + 1) / len(card_names), text=progress_text)
-            card_tags = set()
+            
             try:
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
-                response = requests.get(api_url)
-                response.raise_for_status() 
+                response = session.get(api_url)
+                response.raise_for_status()
                 card_data = response.json()
-                set_code = card_data['set']
-                collector_num = card_data['collector_number']
-                tagger_url = f"https://tagger.scryfall.com/card/{set_code}/{collector_num}"
-                page.goto(tagger_url, timeout=30000)
-                page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
-                html = page.content()
-                soup = BeautifulSoup(html, "html.parser")
-                card_header = soup.find('h2', string=re.compile(r'^\s*Card\s*$'))
-                if card_header:
-                    tag_container = card_header.find_next_sibling('div')
-                    if tag_container:
-                        tags = tag_container.find_all('a', href=re.compile(r'^/tags/card/'))
-                        for tag in tags:
-                            tag_text = tag.get_text(strip=True)
-                            if tag_text not in EXCLUDED_TAGS:
-                                card_tags.add(tag_text.replace('-', ' ').capitalize())
-                if not card_tags:
-                    all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
-                    for tag in all_tags:
-                        tag_text = tag.get_text(strip=True)
-                        if tag_text not in EXCLUDED_TAGS:
-                            card_tags.add(tag_text.replace('-', ' ').capitalize())
+
+                tagger_url = card_data.get('scryfall_uri', '').replace('scryfall.com', 'tagger.scryfall.com')
+                if not tagger_url: continue
+
+                response = session.get(tagger_url, timeout=20)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                card_tags = set()
+                tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
+                for tag in tags:
+                    tag_text = tag.get_text(strip=True)
+                    if tag_text not in EXCLUDED_TAGS:
+                        card_tags.add(tag_text.replace('-', ' ').capitalize())
+                
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
-                time.sleep(random.uniform(0.1, 0.25))
+                
+                time.sleep(random.uniform(0.1, 0.2))
+
             except Exception as e:
                 st.warning(f"Could not scrape '{name}'. (Error: {e})")
                 continue
-        browser.close()
+    
     progress_bar.empty()
     if not scraped_data:
         st.error("Could not scrape any tags from the Scryfall Tagger.")
         return pd.DataFrame()
+
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
 
@@ -556,6 +513,7 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
         st.header("Dashboard & Analysis")
+        # ... (rest of main() is unchanged)
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -806,7 +764,11 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
+    
+    if 'debug_html' in st.session_state and st.session_state.debug_html != "No HTML captured yet.":
+        with st.expander("Scraped Page HTML for Debugging"):
+            st.code(st.session_state.debug_html)
 
 if __name__ == "__main__":
-    if setup_complete:
-        main()
+    # Removed the setup_complete check as Playwright is no longer needed
+    main()
