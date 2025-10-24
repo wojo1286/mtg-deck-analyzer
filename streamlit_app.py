@@ -72,8 +72,7 @@ setup_complete = setup_playwright()
 
 def parse_table(html, deck_id, deck_source):
     """
-    Parses the HTML of a deck table to extract card data using a more
-    robust, multi-layered method.
+    Parses the HTML of a deck table to extract card data using a multi-layered method.
     """
     soup = BeautifulSoup(html, "html.parser")
     cards = []
@@ -82,23 +81,19 @@ def parse_table(html, deck_id, deck_source):
     for table in soup.find_all("table"):
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
-            if len(tds) < 5:
-                continue
+            if len(tds) < 5: continue
 
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
             
-            if not name:
-                continue
+            if not name: continue
 
             cmc_el = tr.find("span", class_="float-right")
             cmc = cmc_el.get_text(strip=True) if cmc_el else None
             price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
 
-            # --- NEW MULTI-LAYERED TYPE FINDING LOGIC ---
             ctype = None
-
-            # Method 1: Find name's cell, then check the next cell. (Most reliable)
+            # Method 1: Check cell immediately after the name cell
             if name_el:
                 name_td = name_el.find_parent("td")
                 if name_td:
@@ -107,14 +102,14 @@ def parse_table(html, deck_id, deck_source):
                         possible_type = type_td.get_text(strip=True).split("—")[0].strip()
                         if possible_type in card_types:
                             ctype = possible_type
-
-            # Method 2 (Fallback): Check a specific column index (5th column).
+            
+            # Method 2: Check the 5th cell (index 4) as a fallback
             if not ctype and len(tds) > 4:
                 possible_type = tds[4].get_text(strip=True).split("—")[0].strip()
                 if possible_type in card_types:
                     ctype = possible_type
             
-            # Method 3 (Final Fallback): Brute-force search all cells.
+            # Method 3: Brute force search all cells
             if not ctype:
                 ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in card_types), None)
 
@@ -122,13 +117,10 @@ def parse_table(html, deck_id, deck_source):
                 "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
                 "name": name, "type": ctype, "price": price
             })
-            
     return cards
-
 
 @st.cache_data
 def get_commander_color_identity(commander_slug):
-    """Fetches the commander's color identity from EDHREC's JSON endpoint."""
     try:
         url = f"https://json.edhrec.com/pages/commanders/{commander_slug}.json"
         response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -168,6 +160,9 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     progress_bar = st.progress(0)
     status_text = st.empty()
     
+    # --- DEBUGGING: Initialize HTML holder in session state ---
+    st.session_state.debug_html = "No HTML captured yet."
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
@@ -177,19 +172,20 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
             try:
                 page.goto(deck_url, timeout=90000)
                 page.click('button[data-rr-ui-event-key="table"]')
-                
                 page.wait_for_selector("table tbody tr", timeout=20000)
                 page.wait_for_timeout(500)
 
                 html = page.content()
+                # --- DEBUGGING: Capture the HTML of the first page ---
+                if i == 0:
+                    st.session_state.debug_html = html
+
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 cards = parse_table(html, deck_id, deck_source)
 
-                if cards: 
-                    all_cards.extend(cards)
-                else:
-                    st.warning(f"No cards parsed for {deck_url}, though page loaded.")
+                if cards: all_cards.extend(cards)
+                else: st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                         
                 time.sleep(random.uniform(0.5, 1.5))
             except Exception as e:
@@ -201,6 +197,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
+# ... (The rest of the script from the previous version remains exactly the same) ...
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -345,11 +342,6 @@ def generate_average_deck(df, commander_slug, color_identity):
     return sorted(decklist)
 @st.cache_data(ttl=604800) # Cache for 7 days
 def import_edhrec_categories():
-    """
-    Builds a functional category list by fetching card recommendations
-    from several popular and color-diverse commanders on EDHREC.
-    THIS IS A PURE DATA FUNCTION and is safe to cache.
-    """
     commander_slugs = [
         "atraxa-praetors-voice", "kenrith-the-returned-king", "korvold-fae-cursed-king",
         "chulane-teller-of-tales", "prosper-tome-bound", "yuriko-the-tigers-shadow",
@@ -382,27 +374,20 @@ def import_edhrec_categories():
                                 if card_name not in all_card_tags:
                                     all_card_tags[card_name] = set()
                                 all_card_tags[card_name].add(clean_name)
-            time.sleep(0.25) # Be polite to the API
+            time.sleep(0.25)
         except (requests.RequestException, json.JSONDecodeError):
-            # We just skip failures in the cached function
             continue
             
-    if not all_card_tags:
-        return pd.DataFrame()
+    if not all_card_tags: return pd.DataFrame()
 
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
 @st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
 def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
-    """
-    Scrapes the Scryfall Tagger page for a given list of unique card names.
-    Filters the results based on a user-provided list of junk tags.
-    """
     BASE_EXCLUDED_TAGS = { 'abrade', 'modal', 'single english word name' }
     user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
     EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
-
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
 
@@ -414,27 +399,20 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
             progress_text = f"Scraping '{name}' ({i+1}/{len(card_names)})..."
             progress_bar.progress((i + 1) / len(card_names), text=progress_text)
             card_tags = set()
-
             try:
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
-                
                 response = requests.get(api_url)
                 response.raise_for_status() 
                 card_data = response.json()
-                
                 set_code = card_data['set']
                 collector_num = card_data['collector_number']
                 tagger_url = f"https://tagger.scryfall.com/card/{set_code}/{collector_num}"
-
                 page.goto(tagger_url, timeout=30000)
                 page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
-                
                 html = page.content()
                 soup = BeautifulSoup(html, "html.parser")
-
                 card_header = soup.find('h2', string=re.compile(r'^\s*Card\s*$'))
-                
                 if card_header:
                     tag_container = card_header.find_next_sibling('div')
                     if tag_container:
@@ -443,41 +421,28 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
                             tag_text = tag.get_text(strip=True)
                             if tag_text not in EXCLUDED_TAGS:
                                 card_tags.add(tag_text.replace('-', ' ').capitalize())
-                
                 if not card_tags:
                     all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
                     for tag in all_tags:
                         tag_text = tag.get_text(strip=True)
                         if tag_text not in EXCLUDED_TAGS:
                             card_tags.add(tag_text.replace('-', ' ').capitalize())
-                
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
-
                 time.sleep(random.uniform(0.1, 0.25))
-
             except Exception as e:
                 st.warning(f"Could not scrape '{name}'. (Error: {e})")
                 continue
-        
         browser.close()
-
     progress_bar.empty()
-
     if not scraped_data:
         st.error("Could not scrape any tags from the Scryfall Tagger.")
         return pd.DataFrame()
-
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
 
-# ===================================================================
-# 4. STREAMLIT UI & APP LOGIC
-# ===================================================================
 def main():
     st.title("MTG Deckbuilding Analysis Tool")
-
-    # --- Initialize Google Sheets Connection ---
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         st.session_state.gsheets_connected = True
@@ -486,8 +451,6 @@ def main():
         st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
 
     df_raw = None
-
-    # --- DATA SOURCE SELECTION ---
     st.sidebar.header("Deck Data Source")
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
     
@@ -503,23 +466,14 @@ def main():
             
     elif data_source_option == "Scrape New Data":
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
-        
-        bracket_options = {
-            "All Decks": "", "Budget": "budget", "Upgraded": "upgraded", 
-            "Optimized": "optimized", "cEDH": "cedh"
-        }
+        bracket_options = {"All Decks": "", "Budget": "budget", "Upgraded": "upgraded", "Optimized": "optimized", "cEDH": "cedh"}
         selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
         selected_bracket_slug = bracket_options[selected_bracket_name]
-
         deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
         
         if st.sidebar.button("🚀 Start Scraping"):
-            with st.spinner("Scraping in progress... this may take several minutes."):
-                df_scraped, colors = run_scraper(
-                    commander_slug, deck_limit, 
-                    bracket_slug=selected_bracket_slug, 
-                    bracket_name=selected_bracket_name
-                )
+            with st.spinner("Scraping in progress..."):
+                df_scraped, colors = run_scraper(commander_slug, deck_limit, bracket_slug=selected_bracket_slug, bracket_name=selected_bracket_name)
                 st.session_state.scraped_df = df_scraped
                 st.session_state.commander_colors = colors
                 st.rerun()
@@ -530,13 +484,9 @@ def main():
         if data_source_option == "Scrape New Data":
             commander_slug_for_tools = commander_slug
 
-    # --- RESET BUTTON ---
     st.sidebar.divider()
     if st.sidebar.button("🧹 Clear All Data & Reset"):
-        keys_to_clear = [
-            'scraped_df', 'commander_colors', 'master_categories', 'junk_tags',
-            'imported_tags', 'func_constraints', 'type_constraints'
-        ]
+        keys_to_clear = ['scraped_df', 'commander_colors', 'master_categories', 'junk_tags', 'imported_tags', 'func_constraints', 'type_constraints', 'debug_html']
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
@@ -544,13 +494,9 @@ def main():
         time.sleep(1)
         st.rerun()
 
-    # ===============================================================
-    # CARD CATEGORY DATA LOADING LOGIC
-    # ===============================================================
     st.sidebar.header("Card Categories")
-
     if st.sidebar.button("Import Broad Categories from EDHREC 📋"):
-        with st.spinner("Importing functional categories from EDHREC..."):
+        with st.spinner("Importing functional categories..."):
             edhrec_tags_df = import_edhrec_categories()
         if not edhrec_tags_df.empty:
             st.session_state.imported_tags = edhrec_tags_df
@@ -594,7 +540,6 @@ def main():
         if gsheets_df is not None and not gsheets_df.empty:
             st.warning("Your 'Categories' Google Sheet is missing the 'name' column and will be ignored.")
         gsheets_df = pd.DataFrame(columns=['name', 'category'])
-
     if imported_df is None or 'name' not in imported_df.columns:
         imported_df = pd.DataFrame(columns=['name', 'category'])
 
@@ -602,22 +547,16 @@ def main():
         merged_df = pd.merge(gsheets_df, imported_df, on='name', how='outer', suffixes=('_gsheet', '_imported'))
         merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
         merged_df['category_imported'] = merged_df['category_imported'].fillna('')
-        merged_df['category'] = np.where(
-            merged_df['category_gsheet'] != '', 
-            merged_df['category_gsheet'], 
-            merged_df['category_imported']
-        )
+        merged_df['category'] = np.where(merged_df['category_gsheet'] != '', merged_df['category_gsheet'], merged_df['category_imported'])
         categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
         st.sidebar.info("Combined GSheet & Imported tags.")
-
     st.sidebar.divider()
     
-    # --- MAIN APP DISPLAY LOGIC ---
     if df_raw is not None:
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
-
         st.header("Dashboard & Analysis")
+        # ... (rest of main() is unchanged)
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -868,6 +807,11 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
+
+    # --- DEBUGGING: Display the captured HTML ---
+    if 'debug_html' in st.session_state and st.session_state.debug_html:
+        with st.expander("Scraped Page HTML for Debugging"):
+            st.code(st.session_state.debug_html)
 
 if __name__ == "__main__":
     if setup_complete:
