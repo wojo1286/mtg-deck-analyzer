@@ -339,11 +339,14 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                         # Click the 'Type' button inside the dropdown
                         type_button_selector = 'div[class*="dropdown-menu show"] button:has-text("Type")'
                         page.click(type_button_selector, timeout=5000)
-                        st.write(f"[{i+1}] ...Clicked 'Type'. Dropdown will close automatically.")
+                        st.write(f"[{i+1}] ...Clicked 'Type'.")
                         
-                        # Wait for the table to re-render
-                        page.wait_for_timeout(1000) 
-                        st.write(f"[{i+1}] ...Table should be updating.")
+                        # --- THIS IS THE FIX ---
+                        # Instead of a blind sleep, wait for the 'Type' header to appear in the DOM
+                        st.write(f"[{i+1}] ...Waiting for 'Type' header to re-appear...")
+                        page.wait_for_selector(type_header_selector, timeout=10000)
+                        st.write(f"[{i+1}] ...'Type' header is now visible.")
+                        # --- END FIX ---
                     
                     except Exception as e:
                         st.error(f"Could not enable 'Type' column for {deck_url}. Error: {e}")
@@ -356,12 +359,20 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                     st.write(f"[{i+1}] ...'Type' column is already visible. Skipping clicks.")
 
                 # --- STEP 4: Wait for the *final* table data to load ---
-                st.write(f"[{i+1}] Waiting for final table data...")
+                st.write(f"[{i+1}] Waiting for final table data (card links)...")
                 try:
                     page.wait_for_selector("table tbody tr a[href*='cards.edhrec.com']", timeout=20000)
                 except Exception as e:
-                    st.warning(f"Final table data did not load for {deck_url}. Skipping. Error: {e}")
-                    continue
+                    # --- THIS IS THE NEW DEBUGGING ---
+                    st.error(f"Final table data did not load for {deck_url}. Error: {e}")
+                    
+                    screenshot_path = "debug_final_table_fail.png"
+                    page.screenshot(path=screenshot_path)
+                    st.image(screenshot_path, caption=f"DEBUG: 'Type' column *should* be visible, but table data (card links) did not load on {deck_url}")
+                    
+                    st.warning("Stopping app for debugging. Check screenshot.")
+                    st.stop()
+                    # --- END DEBUGGING ---
 
                 # --- STEP 5: Parse the table (and stop for debug) ---
                 st.write(f"[{i+1}] Parsing table...")
@@ -369,7 +380,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 
                 screenshot_path = "debug_final_view.png"
                 page.screenshot(path=screenshot_path)
-                st.image(screenshot_path, caption=f"DEBUG: Final view for {deck_D}. 'Type' column should be visible.")
+                st.image(screenshot_path, caption=f"DEBUG: Final view for {deck_url}. 'Type' column should be visible.")
 
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
