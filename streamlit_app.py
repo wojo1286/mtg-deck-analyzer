@@ -186,141 +186,77 @@ def _extract_type_from_row(tr, tds, type_idx):
 
 
 def parse_table(html, deck_id, deck_source):
-    st.write("---")
-    st.write(f"**Debugging parse_table for deck {deck_id}**")
-    
     soup = BeautifulSoup(html, "html.parser")
     cards = []
-    
-    table = soup.find("table") # Let's just assume it's the first table
-    if not table:
-        st.error("No <table> element found in HTML.")
-        st.stop()
-        
-    header_row = table.find("tr")
-    header_cells = header_row.find_all(["th", "td"]) if header_row else []
-    
-    header_texts = [cell.get_text(strip=True).lower() for cell in header_cells]
-    st.write(f"Found headers: `{header_texts}`")
+    for table in soup.find_all("table"):
+        header_row = table.find("tr")
+        header_cells = header_row.find_all(["th", "td"]) if header_row else []
+        has_header = bool(header_row and header_row.find_all("th"))
 
-    type_idx = price_idx = cmc_idx = None
-    for idx, header_text in enumerate(header_texts):
-        if "type" in header_text:
-            type_idx = idx
-        elif "price" in header_text:
-            price_idx = idx
-        elif "cmc" in header_text or "cost" in header_text:
-            cmc_idx = idx
-            
-    st.write(f"Index for 'type': `{type_idx}`")
-    st.write(f"Index for 'cmc': `{cmc_idx}`")
-    st.write(f"Index for 'price': `{price_idx}`")
+        type_idx = price_idx = cmc_idx = None
+        for idx, cell in enumerate(header_cells):
+            header_text = cell.get_text(strip=True).lower()
+            if "type" in header_text:
+                type_idx = idx
+            # --- THIS IS THE FIX ---
+            elif "price" in header_text or "card kingdom" in header_text:
+            # --- END FIX ---
+                price_idx = idx
+            elif "cmc" in header_text or "cost" in header_text:
+                cmc_idx = idx
 
-    if type_idx is None:
-        st.error("Could not find 'type' in headers. Stopping.")
-        st.stop()
+        rows = table.find_all("tr")
+        data_rows = rows[1:] if has_header else rows
 
-    rows = table.find_all("tr")
-    data_rows = rows[1:] if (header_row and header_row.find_all("th")) else rows
-    
-    st.write(f"Found {len(data_rows)} data rows.")
+        for tr in data_rows:
+            tds = tr.find_all("td")
+            if not tds:
+                continue
 
-    if not data_rows:
-        st.error("Found table but no data rows. Stopping.")
-        st.stop()
+            name_el = tr.find("a")
+            name = name_el.get_text(strip=True) if name_el else None
 
-    # --- Debug the first data row ---
-    st.write("**Parsing first data row...**")
-    tr = data_rows[0]
-    tds = tr.find_all("td")
-    if not tds:
-        st.error("First row has no `<td>` cells. Stopping.")
-        st.stop()
+            cmc = None
+            if cmc_idx is not None and len(tds) > cmc_idx:
+                cmc = tds[cmc_idx].get_text(strip=True)
+            else:
+                cmc_el = tr.find("span", class_="float-right")
+                cmc = cmc_el.get_text(strip=True) if cmc_el else None
 
-    name_el = tr.find("a")
-    name = name_el.get_text(strip=True) if name_el else "Not Found"
-    st.write(f"Name: `{name}`")
+            raw_type = None
+            if type_idx is not None and len(tds) > type_idx:
+                raw_type = tds[type_idx].get_text(strip=True)
+            else:
+                raw_type = next(
+                    (
+                        td.get_text(strip=True)
+                        for td in tds
+                        if _extract_primary_type(td.get_text(strip=True)) is not None
+                    ),
+                    None,
+                )
+            ctype = _extract_primary_type(raw_type)
 
-    # --- Debug TYPE extraction ---
-    raw_type = None
-    if type_idx is not None and len(tds) > type_idx:
-        raw_type = tds[type_idx].get_text(strip=True)
-        st.write(f"Raw type string from cell {type_idx}: `{raw_type}`")
-    else:
-        st.warning(f"Type index was {type_idx}, but row only has {len(tds)} cells. Trying fallback.")
-        raw_type = next(
-            (
-                td.get_text(strip=True)
-                for td in tds
-                if _extract_primary_type(td.get_text(strip=True)) is not None
-            ),
-            None,
-        )
-        st.write(f"Raw type string from fallback: `{raw_type}`")
+            price = None
+            if price_idx is not None and len(tds) > price_idx:
+                price = tds[price_idx].get_text(strip=True)
+            else:
+                price = next(
+                    (td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")),
+                    None,
+                )
 
-    ctype = _extract_primary_type(raw_type)
-    st.write(f"**Final parsed type:** `{ctype}`")
-    
-    # --- Now parse all cards normally ---
-    for tr in data_rows:
-        tds = tr.find_all("td")
-        if not tds:
-            continue
-
-        name_el = tr.find("a")
-        name = name_el.get_text(strip=True) if name_el else None
-
-        cmc = None
-        if cmc_idx is not None and len(tds) > cmc_idx:
-            cmc = tds[cmc_idx].get_text(strip=True)
-        else:
-            cmc_el = tr.find("span", class_="float-right")
-            cmc = cmc_el.get_text(strip=True) if cmc_el else None
-
-        raw_type = None
-        if type_idx is not None and len(tds) > type_idx:
-            raw_type = tds[type_idx].get_text(strip=True)
-        else:
-            raw_type = next(
-                (
-                    td.get_text(strip=True)
-                    for td in tds
-                    if _extract_primary_type(td.get_text(strip=True)) is not None
-                ),
-                None,
-            )
-        ctype = _extract_primary_type(raw_type)
-
-        price = None
-        if price_idx is not None and len(tds) > price_idx:
-            price = tds[price_idx].get_text(strip=True)
-        else:
-            price = next(
-                (td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")),
-                None,
-            )
-
-        if name:
-            cards.append(
-                {
-                    "deck_id": deck_id,
-                    "deck_source": deck_source,
-                    "cmc": cmc,
-                    "name": name,
-                    "type": ctype,
-                    "price": price,
-                }
-            )
-            
-    if cards:
-        st.subheader("Data from first parsed card (full list):")
-        st.json(cards[0])
-    else:
-        st.error("Could not parse any cards from the data rows.")
-        
-    st.warning("Stopping app after parsing one table for debugging.")
-    st.stop()
-    
+            if name:
+                cards.append(
+                    {
+                        "deck_id": deck_id,
+                        "deck_source": deck_source,
+                        "cmc": cmc,
+                        "name": name,
+                        "type": ctype,
+                        "price": price,
+                    }
+                )
     return cards
 
 @st.cache_data
@@ -358,11 +294,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error(f"No decks found for '{commander_slug}' in '{bracket_name}'."); return None, []
 
     df_meta = pd.json_normalize(decks).head(deck_limit)
-    
-    # --- THIS IS THE FIX ---
     df_meta["deckpreview_url"] = df_meta["urlhash"].apply(lambda x: f"https://edhrec.com/deckpreview/{x}")
-    # --- END FIX ---
-    
     st.success(f"Found {len(decks)} decks. Scraping the first {len(df_meta)}.")
 
     all_cards = []
