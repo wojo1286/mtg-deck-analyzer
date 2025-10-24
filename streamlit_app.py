@@ -186,144 +186,78 @@ def _extract_type_from_row(tr, tds, type_idx):
 
 
 def parse_table(html, deck_id, deck_source):
-    st.write("---")
-    st.write(f"**Debugging parse_table for deck {deck_id}**")
-    
     soup = BeautifulSoup(html, "html.parser")
     cards = []
-    
-    table = soup.find("table") 
-    if not table:
-        st.error(f"No <table> element found in HTML for deck {deck_id}.")
-        st.warning("Stopping app for debugging.")
-        st.stop()
-        
-    header_row = table.find("tr")
-    header_cells = header_row.find_all(["th", "td"]) if header_row else []
-    
-    header_texts = [cell.get_text(strip=True).lower() for cell in header_cells]
-    st.write(f"Found headers: `{header_texts}`")
+    for table in soup.find_all("table"):
+        header_row = table.find("tr")
+        header_cells = header_row.find_all(["th", "td"]) if header_row else []
+        has_header = bool(header_row and header_row.find_all("th"))
 
-    type_idx = price_idx = cmc_idx = None
-    for idx, header_text in enumerate(header_texts):
-        if "type" in header_text:
-            type_idx = idx
-        elif "price" in header_text or "card kingdom" in header_text:
-            price_idx = idx
-        elif "cmc" in header_text or "cost" in header_text:
-            cmc_idx = idx
-            
-    st.write(f"Index for 'type': `{type_idx}`")
-    st.write(f"Index for 'cmc': `{cmc_idx}`")
-    st.write(f"Index for 'price': `{price_idx}`")
+        type_idx = price_idx = cmc_idx = None
+        for idx, cell in enumerate(header_cells):
+            header_text = cell.get_text(strip=True).lower()
+            if "type" in header_text:
+                type_idx = idx
+            elif "price" in header_text or "card kingdom" in header_text: # Handle price column name
+                price_idx = idx
+            elif "cmc" in header_text or "cost" in header_text:
+                cmc_idx = idx
 
-    if type_idx is None:
-        st.error(f"Could not find 'type' in headers for deck {deck_id}.")
-        st.warning("Stopping app for debugging.")
-        st.stop()
+        rows = table.find_all("tr")
+        data_rows = rows[1:] if has_header else rows
 
-    rows = table.find_all("tr")
-    data_rows = rows[1:] if (header_row and header_row.find_all("th")) else rows
-    
-    st.write(f"Found {len(data_rows)} data rows.")
+        if type_idx is None: # Basic check if type column was found
+            st.warning(f"Could not find 'Type' column header when parsing deck {deck_id}. Types might be incorrect.")
 
-    if not data_rows:
-        st.error(f"Found table but no data rows for deck {deck_id}.")
-        st.warning("Stopping app for debugging.")
-        st.stop()
+        for tr in data_rows:
+            tds = tr.find_all("td")
+            if not tds:
+                continue
 
-    # --- Debug the first data row ---
-    st.write("**Parsing first data row...**")
-    tr = data_rows[0]
-    tds = tr.find_all("td")
-    if not tds:
-        st.error(f"First row has no `<td>` cells for deck {deck_id}.")
-        st.warning("Stopping app for debugging.")
-        st.stop()
+            name_el = tr.find("a")
+            name = name_el.get_text(strip=True) if name_el else None
 
-    name_el = tr.find("a")
-    name = name_el.get_text(strip=True) if name_el else "Not Found"
-    st.write(f"Name: `{name}`")
+            cmc = None
+            if cmc_idx is not None and len(tds) > cmc_idx:
+                cmc = tds[cmc_idx].get_text(strip=True)
+            else: # Fallback if CMC column wasn't found by header text
+                cmc_el = tr.find("span", class_="float-right")
+                cmc = cmc_el.get_text(strip=True) if cmc_el else None
 
-    # --- Debug TYPE extraction ---
-    raw_type = None
-    if type_idx is not None and len(tds) > type_idx:
-        raw_type = tds[type_idx].get_text(strip=True)
-        st.write(f"Raw type string from cell {type_idx}: `{raw_type}`")
-    else:
-        st.warning(f"Type index was {type_idx}, but row only has {len(tds)} cells. Trying fallback.")
-        raw_type = next(
-            (
-                td.get_text(strip=True)
-                for td in tds
-                if _extract_primary_type(td.get_text(strip=True)) is not None
-            ),
-            None,
-        )
-        st.write(f"Raw type string from fallback: `{raw_type}`")
+            raw_type = None
+            if type_idx is not None and len(tds) > type_idx:
+                raw_type = tds[type_idx].get_text(strip=True)
+            else: # Fallback if type column index is invalid for this row
+                raw_type = next(
+                    (
+                        td.get_text(strip=True)
+                        for td in tds
+                        if _extract_primary_type(td.get_text(strip=True)) is not None
+                    ),
+                    None,
+                )
+            ctype = _extract_primary_type(raw_type)
 
-    ctype = _extract_primary_type(raw_type)
-    st.write(f"**Final parsed type:** `{ctype}`")
-    
-    # --- Now parse all cards normally ---
-    for tr in data_rows:
-        tds = tr.find_all("td")
-        if not tds:
-            continue
+            price = None
+            if price_idx is not None and len(tds) > price_idx:
+                price = tds[price_idx].get_text(strip=True)
+            else: # Fallback if price column wasn't found by header text
+                price = next(
+                    (td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")),
+                    None,
+                )
 
-        name_el = tr.find("a")
-        name = name_el.get_text(strip=True) if name_el else None
-        
-        cmc = None
-        if cmc_idx is not None and len(tds) > cmc_idx:
-            cmc = tds[cmc_idx].get_text(strip=True)
-        else:
-            cmc_el = tr.find("span", class_="float-right")
-            cmc = cmc_el.get_text(strip=True) if cmc_el else None
-
-        raw_type = None
-        if type_idx is not None and len(tds) > type_idx:
-            raw_type = tds[type_idx].get_text(strip=True)
-        else:
-            raw_type = next(
-                (
-                    td.get_text(strip=True)
-                    for td in tds
-                    if _extract_primary_type(td.get_text(strip=True)) is not None
-                ),
-                None,
-            )
-        ctype = _extract_primary_type(raw_type)
-
-        price = None
-        if price_idx is not None and len(tds) > price_idx:
-            price = tds[price_idx].get_text(strip=True)
-        else:
-            price = next(
-                (td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")),
-                None,
-            )
-
-        if name:
-            cards.append(
-                {
-                    "deck_id": deck_id,
-                    "deck_source": deck_source,
-                    "cmc": cmc,
-                    "name": name,
-                    "type": ctype,
-                    "price": price,
-
-                }
-            )
-            
-    if cards:
-        st.write(f"Successfully parsed {len(cards)} cards for this deck.")
-    else:
-        st.error(f"Could not parse any cards from the data rows for deck {deck_id}.")
-        st.warning("Stopping app for debugging.")
-        st.stop()
-    
+            if name:
+                cards.append(
+                    {
+                        "deck_id": deck_id,
+                        "deck_source": deck_source,
+                        "cmc": cmc,
+                        "name": name,
+                        "type": ctype,
+                        "price": price,
+                    }
+                )
     return cards
 
 @st.cache_data
@@ -378,15 +312,15 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
             try:
                 page.goto(deck_url, timeout=90000)
 
-                # --- STEP 1: Click the 'Table' tab ---
+                # --- Click the 'Table' tab ---
                 page.click('button[data-rr-ui-event-key="table"]')
                 page.wait_for_selector("div[class*='TableView_table']", timeout=10000)
 
-                # --- STEP 2: Check if 'Type' column is already visible ---
+                # --- Check if 'Type' column is already visible ---
                 type_header_selector = 'th:has-text("Type")'
                 is_type_visible = page.is_visible(type_header_selector)
 
-                # --- STEP 3: If 'Type' is NOT visible, enable it ---
+                # --- If 'Type' is NOT visible, enable it ---
                 if not is_type_visible:
                     try:
                         page.click('button:has-text("Edit Columns")', timeout=5000)
@@ -398,28 +332,17 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                         st.warning(f"Could not enable 'Type' column for {deck_url}. Skipping. Error: {e}")
                         continue # Skip to the 'finally' block
 
-                # --- STEP 4: Wait for DATA ROWS to appear ---
-                # This is the new wait to ensure the card rows are loaded
-                st.write(f"[{i+1}] Waiting for data rows (td elements)...")
+                # --- Wait for DATA ROWS to appear ---
                 try:
-                    # Wait specifically for the first data cell (<td>) in the table body
                     page.wait_for_selector("table tbody tr td", timeout=15000)
-                    st.write(f"[{i+1}] ...Data rows are visible.")
                 except Exception as e:
-                    st.error(f"Data rows (<td> elements) did not appear for deck {deck_url}. Error: {e}")
-                    # Add screenshot here if needed
-                    # screenshot_path = f"debug_data_rows_fail_{deck_id}.png"
-                    # page.screenshot(path=screenshot_path)
-                    # st.image(screenshot_path, caption=f"DEBUG: Failed waiting for data rows on {deck_url}")
-                    st.warning("Stopping app for debugging.")
-                    st.stop()
+                    st.warning(f"Data rows (<td> elements) did not appear for deck {deck_url}. Skipping. Error: {e}")
+                    continue # Skip to the 'finally' block
 
-                # --- STEP 5: Parse the table ---
+                # --- Parse the table ---
                 html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
-
-                # This function will print debug info and stop IF IT FAILS
                 cards = parse_table(html, deck_id, deck_source)
 
                 if cards:
@@ -431,7 +354,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
 
             finally:
-                # This sleep will ALWAYS run
+                # Ensure a delay between requests
                 time.sleep(random.uniform(0.5, 1.5))
 
             progress_bar.progress((i + 1) / len(df_meta))
