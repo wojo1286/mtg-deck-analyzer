@@ -12,6 +12,9 @@ from copy import deepcopy
 import time
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+import subprocess
+import sys
 import urllib.parse
 import json
 from pathlib import Path
@@ -31,13 +34,36 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
 
 # ===================================================================
-# 2. DATA SCRAPING & PROCESSING FUNCTIONS
+# 2. PLAYWRIGHT INSTALLATION (Only needed for Scryfall Tagger)
+# ===================================================================
+@st.cache_resource
+def setup_playwright():
+    """Installs Playwright's browser binary for the Scryfall Tagger."""
+    st.write("Verifying browser dependencies for Scryfall Tagger...")
+    try:
+        command = [sys.executable, "-m", "playwright", "install", "chromium"]
+        # Use a spinner for a cleaner UI during installation
+        with st.spinner("Installing Chromium browser (first run only)..."):
+            process = subprocess.run(
+                command, capture_output=True, text=True, check=True, timeout=600
+            )
+        st.success("Browser dependencies are ready!")
+        return True
+    except Exception as e:
+        st.error("Failed to install browser dependencies for Playwright.")
+        st.code(f"Error: {e}")
+        return False
+
+# This line executes the setup function once per session.
+setup_complete = setup_playwright()
+
+
+# ===================================================================
+# 3. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
 def parse_card_data_from_json(card_lists, deck_id, deck_source):
-    """
-    Parses the __NEXT_DATA__ JSON to extract card data robustly.
-    """
+    """Parses the __NEXT_DATA__ JSON to extract card data."""
     cards = []
     card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
     
@@ -45,15 +71,12 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
         return []
 
     for card_group in card_lists:
-        # Ensure card_group is a dictionary and has 'cardviews'
         if not isinstance(card_group, dict) or 'cardviews' not in card_group:
             continue
-
         for card in card_group.get('cardviews', []):
             try:
                 name = card.get("name")
-                if not name:
-                    continue
+                if not name: continue
 
                 ctype_raw = card.get("primary_type")
                 ctype = ctype_raw if ctype_raw in card_types else card.get("type", "").split("—")[0].strip()
@@ -62,15 +85,10 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
                 price = f"${price_val}" if price_val is not None else None
 
                 cards.append({
-                    "deck_id": deck_id,
-                    "deck_source": deck_source,
-                    "cmc": cmc,
-                    "name": name,
-                    "type": ctype,
-                    "price": price
+                    "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
+                    "name": name, "type": ctype, "price": price
                 })
             except (KeyError, TypeError, AttributeError):
-                # Skip malformed card entries
                 continue
     return cards
 
@@ -94,7 +112,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     if budget_slug: base_url += f"/{budget_slug}"
     json_url = base_url + ".json"
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
     try:
         r = requests.get(json_url, headers=headers); r.raise_for_status(); data = r.json()
     except requests.RequestException as e:
@@ -118,7 +136,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     st.session_state.debug_html = "No HTML captured yet."
 
     with requests.Session() as session:
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        session.headers.update(headers)
         for i, row in df_meta.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
@@ -129,7 +147,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
 
                 if i == 0: st.session_state.debug_html = html
 
-                soup = BeautifulSoup(html, "html.parser")
+                soup = BeautifulSoup(html, "lxml")
                 script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
                 
                 if not script_tag:
@@ -148,8 +166,9 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                     all_cards.extend(cards)
                 else:
                     st.warning(f"No cards parsed for {deck_url}, though page loaded.")
-                        
-                time.sleep(random.uniform(0.1, 0.25)) # A small, fast delay
+                
+                # Re-introduced a moderate delay to avoid being rate-limited
+                time.sleep(random.uniform(0.4, 0.8))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
             progress_bar.progress((i + 1) / len(df_meta))
@@ -158,25 +177,29 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
-# ... (The rest of the script remains exactly the same) ...
-
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
+    if _df is None or _df.empty:
+        return pd.DataFrame(), False, 0, pd.DataFrame()
+        
     dfc = _df.copy()
     dfc['price_clean'] = pd.to_numeric(dfc.get('price', '').astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce')
     dfc['cmc'] = pd.to_numeric(dfc.get('cmc'), errors='coerce')
     dfc['type'] = dfc.get('type', 'Unknown').fillna('Unknown')
     
     functional_analysis_enabled = False
-    if _categories_df is not None and not _categories_df.empty:
+    if _categories_df is not None and not _categories_df.empty and 'name' in _categories_df.columns:
         dfc = pd.merge(dfc, _categories_df, on='name', how='left')
         dfc['category'] = dfc['category'].fillna('Uncategorized')
         functional_analysis_enabled = True
     
     num_decks = dfc['deck_id'].nunique()
-    pop_all = (dfc.groupby('name').agg(count=('deck_id','nunique')).reset_index().sort_values('count', ascending=False))
-    pop_all['inclusion_rate'] = (pop_all['count'] / num_decks) * 100
-    
+    if num_decks > 0:
+        pop_all = (dfc.groupby('name').agg(count=('deck_id','nunique')).reset_index().sort_values('count', ascending=False))
+        pop_all['inclusion_rate'] = (pop_all['count'] / num_decks) * 100
+    else:
+        pop_all = pd.DataFrame(columns=['name', 'count', 'inclusion_rate'])
+
     return dfc, functional_analysis_enabled, num_decks, pop_all
 
 def popularity_table(frame: pd.DataFrame) -> pd.DataFrame:
@@ -191,12 +214,16 @@ def parse_decklist(text: str) -> list:
 
 def build_cococcurrence(source_df: pd.DataFrame, topN: int, exclude_staples_n: int, pop_all_df: pd.DataFrame) -> pd.DataFrame:
     working_df = source_df.copy()
-    if exclude_staples_n > 0:
+    if exclude_staples_n > 0 and not pop_all_df.empty:
         staples_to_exclude = pop_all_df['name'].head(exclude_staples_n).tolist()
         working_df = working_df[~working_df['name'].isin(staples_to_exclude)]
+    
+    if working_df.empty: return pd.DataFrame()
     top_cards = working_df['name'].value_counts().head(topN).index
+    
     f = working_df[working_df['name'].isin(top_cards)]
     if f.empty or 'deck_id' not in f: return pd.DataFrame()
+    
     pivot = pd.crosstab(f['deck_id'], f['name']).reindex(columns=top_cards, fill_value=0)
     return pivot.T.dot(pivot)
 
@@ -229,10 +256,12 @@ def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
                        need = constraints['functions'][func]['target'][1] - constraints['functions'][func]['current']
                        if need > max_need: max_need = need; best_func = func
                 if best_func: constraints['functions'][best_func]['current'] += 1
+    
     remaining = 100 - len(decklist)
     if remaining > 0:
         fillers = candidates_df[~candidates_df['name'].isin(used_cards)].head(remaining)
         decklist.extend(fillers['name'].tolist())
+
     return decklist, constraints
 
 def generate_average_deck(df, commander_slug, color_identity):
@@ -263,7 +292,7 @@ def generate_average_deck(df, commander_slug, color_identity):
     diff = 99 - scaled_template.sum()
     if diff != 0 and not scaled_template.empty: scaled_template[scaled_template.idxmax()] += diff
 
-    commander_name = commander_slug.replace('-', ' ').title()
+    commander_name = ' '.join(word.capitalize() for word in commander_slug.split('-'))
     decklist = [commander_name]
     used_cards = {commander_name}
 
@@ -282,24 +311,15 @@ def generate_average_deck(df, commander_slug, color_identity):
         decklist.extend(top_lands['name'].tolist())
         used_cards.update(top_lands['name'].tolist())
 
-    num_basics = int(scaled_template.get('Basic Land', 0))
+    num_basics = 100 - len(decklist)
     if num_basics > 0:
         basic_land_map = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest'}
         commander_basics = [basic_land_map[c] for c in color_identity if c in basic_land_map]
         if not commander_basics: commander_basics = ['Wastes']
         
-        basics_per_color = num_basics // len(commander_basics)
-        remainder = num_basics % len(commander_basics)
-        for i, land_name in enumerate(commander_basics):
-            count = basics_per_color + (1 if i < remainder else 0)
-            decklist.extend([land_name] * count)
+        basics_to_add = [commander_basics[i % len(commander_basics)] for i in range(num_basics)]
+        decklist.extend(basics_to_add)
 
-    if len(decklist) < 100:
-        remaining = 100 - len(decklist)
-        all_pop = popularity_table(df)
-        fillers = all_pop[~all_pop['name'].isin(used_cards)].head(remaining)
-        decklist.extend(fillers['name'].tolist())
-        
     return sorted(decklist)
 
 @st.cache_data(ttl=604800) # Cache for 7 days
@@ -345,56 +365,54 @@ def import_edhrec_categories():
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
-# This function no longer needs playwright, simplifying it
-@st.cache_data(ttl=2592000)
+@st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
 def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
-    BASE_EXCLUDED_TAGS = {'abrade', 'modal', 'single english word name'}
+    BASE_EXCLUDED_TAGS = { 'abrade', 'modal', 'single english word name' }
     user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
     EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
 
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+
         for i, name in enumerate(card_names):
-            progress_text = f"Scraping Tagger for '{name}' ({i+1}/{len(card_names)})..."
+            progress_text = f"Scraping '{name}' ({i+1}/{len(card_names)})..."
             progress_bar.progress((i + 1) / len(card_names), text=progress_text)
-            
+            card_tags = set()
             try:
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
-                response = session.get(api_url)
-                response.raise_for_status()
+                response = requests.get(api_url)
+                response.raise_for_status() 
                 card_data = response.json()
-
+                
                 tagger_url = card_data.get('scryfall_uri', '').replace('scryfall.com', 'tagger.scryfall.com')
                 if not tagger_url: continue
-
-                response = session.get(tagger_url, timeout=20)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, "html.parser")
                 
-                card_tags = set()
-                tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
-                for tag in tags:
+                page.goto(tagger_url, timeout=30000)
+                page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
+                html = page.content()
+                soup = BeautifulSoup(html, "lxml")
+                
+                all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
+                for tag in all_tags:
                     tag_text = tag.get_text(strip=True)
                     if tag_text not in EXCLUDED_TAGS:
                         card_tags.add(tag_text.replace('-', ' ').capitalize())
                 
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
-                
-                time.sleep(random.uniform(0.1, 0.2))
-
+                time.sleep(random.uniform(0.1, 0.25))
             except Exception as e:
                 st.warning(f"Could not scrape '{name}'. (Error: {e})")
                 continue
-    
+        browser.close()
     progress_bar.empty()
     if not scraped_data:
         st.error("Could not scrape any tags from the Scryfall Tagger.")
         return pd.DataFrame()
-
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
 
@@ -411,22 +429,26 @@ def main():
     st.sidebar.header("Deck Data Source")
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
     
-    commander_slug_for_tools = "ojer-axonil-deepest-might"
+    commander_slug_for_tools = ""
 
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
         if decklist_file:
-            commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
+            try:
+                commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
+            except IndexError:
+                commander_slug_for_tools = "unknown-commander"
             st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
             df_raw = pd.read_csv(decklist_file)
             st.session_state.scraped_df = df_raw
             
     elif data_source_option == "Scrape New Data":
-        commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
+        commander_slug = st.sidebar.text_input("Enter Commander Slug", "ashling-the-pilgrim")
+        commander_slug_for_tools = commander_slug
         bracket_options = {"All Decks": "", "Budget": "budget", "Upgraded": "upgraded", "Optimized": "optimized", "cEDH": "cedh"}
         selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
         selected_bracket_slug = bracket_options[selected_bracket_name]
-        deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
+        deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 10)
         
         if st.sidebar.button("🚀 Start Scraping"):
             with st.spinner("Scraping in progress..."):
@@ -439,7 +461,8 @@ def main():
         df_raw = st.session_state.scraped_df
         st.sidebar.success("Scraped data is loaded.")
         if data_source_option == "Scrape New Data":
-            commander_slug_for_tools = commander_slug
+            commander_slug_for_tools = st.session_state.get('commander_slug_input', commander_slug_for_tools)
+
 
     st.sidebar.divider()
     if st.sidebar.button("🧹 Clear All Data & Reset"):
@@ -462,7 +485,11 @@ def main():
 
     if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading your categories from Google Sheets..."):
-            st.session_state.master_categories = conn.read(worksheet="Categories")
+            try:
+                st.session_state.master_categories = conn.read(worksheet="Categories")
+            except Exception:
+                st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
+                st.sidebar.warning("Could not read 'Categories' sheet.")
 
     if 'junk_tags' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading junk tag list..."):
@@ -493,39 +520,42 @@ def main():
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
     
-    if gsheets_df is None or 'name' not in gsheets_df.columns:
-        if gsheets_df is not None and not gsheets_df.empty:
-            st.warning("Your 'Categories' Google Sheet is missing the 'name' column and will be ignored.")
+    if gsheets_df is not None and not gsheets_df.empty and 'name' not in gsheets_df.columns:
+        st.sidebar.error("GSheets 'Categories' is missing 'name' column.")
         gsheets_df = pd.DataFrame(columns=['name', 'category'])
-    if imported_df is None or 'name' not in imported_df.columns:
-        imported_df = pd.DataFrame(columns=['name', 'category'])
 
-    if not gsheets_df.empty or not imported_df.empty:
-        merged_df = pd.merge(gsheets_df, imported_df, on='name', how='outer', suffixes=('_gsheet', '_imported'))
-        merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
-        merged_df['category_imported'] = merged_df['category_imported'].fillna('')
-        merged_df['category'] = np.where(merged_df['category_gsheet'] != '', merged_df['category_gsheet'], merged_df['category_imported'])
-        categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
-        st.sidebar.info("Combined GSheet & Imported tags.")
+    if not (gsheets_df is None or gsheets_df.empty) or not (imported_df is None or imported_df.empty):
+        try:
+            merged_df = pd.merge(gsheets_df.fillna(''), imported_df.fillna(''), on='name', how='outer', suffixes=('_gsheet', '_imported'))
+            merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
+            merged_df['category_imported'] = merged_df['category_imported'].fillna('')
+            merged_df['category'] = np.where(merged_df['category_gsheet'] != '', merged_df['category_gsheet'], merged_df['category_imported'])
+            categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
+            st.sidebar.info("Combined GSheet & Imported tags.")
+        except KeyError:
+            st.sidebar.error("Error merging category dataframes. Check GSheet columns.")
+            if gsheets_df is not None and not gsheets_df.empty: categories_df_master = gsheets_df
+            elif imported_df is not None and not imported_df.empty: categories_df_master = imported_df
+    
     st.sidebar.divider()
     
-    if df_raw is not None:
+    if df_raw is not None and not df_raw.empty:
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
         st.header("Dashboard & Analysis")
-        # ... (rest of main() is unchanged)
+        
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
             main_top_n = st.slider('Top N Staples:', 5, 100, 25, 5)
             exclude_top = st.checkbox('Exclude Top N Staples', False)
         with col2:
-            unique_types = sorted([t for t in df['type'].unique() if t is not None])
-            exclude_types = st.multiselect('Exclude Types:', options=unique_types, default=[])
+            unique_types = sorted([t for t in df['type'].unique() if t is not None and t != 'Unknown'])
+            exclude_types = st.multiselect('Exclude Types:', options=unique_types)
 
         filtered_df = df.copy()
         if price_cap > 0: filtered_df = filtered_df[(filtered_df['price_clean'].isna()) | (filtered_df['price_clean'] <= price_cap)]
-        if exclude_top: filtered_df = filtered_df[~filtered_df['name'].isin(POP_ALL['name'].head(main_top_n).tolist())]
+        if exclude_top and not POP_ALL.empty: filtered_df = filtered_df[~filtered_df['name'].isin(POP_ALL['name'].head(main_top_n).tolist())]
         if exclude_types: filtered_df = filtered_df[~filtered_df['type'].isin(exclude_types)]
 
         spells_df = filtered_df[~filtered_df['type'].str.contains('Land', na=False)]
@@ -545,7 +575,8 @@ def main():
                 fig_lands.update_layout(yaxis=dict(autorange='reversed'), height=600); st.plotly_chart(fig_lands, use_container_width=True)
         with c3:
             curve = spells_df.groupby('cmc').size().reset_index(name='count')
-            fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
+            if not curve.empty:
+                fig2 = px.bar(curve, x='cmc', y='count', title='Mana Curve (Spells Only)'); st.plotly_chart(fig2, use_container_width=True)
 
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
             with st.expander("Functional Analysis"):
@@ -568,7 +599,7 @@ def main():
             decklist_input = st.text_area("Paste your decklist here:", height=200, key="deck_analyzer_input")
             if st.button("🔍 Analyze My Deck"):
                 user_decklist = parse_decklist(decklist_input)
-                if user_decklist:
+                if user_decklist and not POP_ALL.empty:
                     st.write(f"Analyzing {len(user_decklist)} cards...")
                     staples = POP_ALL[POP_ALL['inclusion_rate'] >= 75]
                     missing_staples = staples[~staples['name'].isin(user_decklist)]
@@ -578,28 +609,32 @@ def main():
                     st.warning("Please paste a decklist to analyze.")
 
             st.subheader("Generate Average Deck")
-            deck_prices = df.groupby('deck_id')['price_clean'].sum()
-            min_p, max_p = float(deck_prices.min()), float(deck_prices.max())
-            price_range = st.slider("Filter decks by Total Price for Average Deck:", min_value=min_p, max_value=max_p, value=(min_p, max_p))
-            if st.button("📊 Generate Average Deck"):
-                with st.spinner("Generating average deck..."):
-                    decks_in_range = deck_prices[(deck_prices >= price_range[0]) & (deck_prices <= price_range[1])].index
-                    filtered_price_df = df[df['deck_id'].isin(decks_in_range)]
-                    avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.get('commander_colors', []))
-                    if avg_deck:
-                        st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.get('commander_colors', ['None']))}")
-                        st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
-            
+            deck_prices = df.groupby('deck_id')['price_clean'].sum().dropna()
+            if not deck_prices.empty:
+                min_p, max_p = float(deck_prices.min()), float(deck_prices.max())
+                price_range = st.slider("Filter decks by Total Price for Average Deck:", min_value=min_p, max_value=max_p, value=(min_p, max_p))
+                if st.button("📊 Generate Average Deck"):
+                    with st.spinner("Generating average deck..."):
+                        decks_in_range = deck_prices[(deck_prices >= price_range[0]) & (deck_prices <= price_range[1])].index
+                        filtered_price_df = df[df['deck_id'].isin(decks_in_range)]
+                        avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.get('commander_colors', []))
+                        if avg_deck:
+                            st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.get('commander_colors', ['None']))}")
+                            st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
+            else:
+                st.info("Price data not available for average deck filtering.")
+
             st.subheader("Generate a Deck Template")
             if FUNCTIONAL_ANALYSIS_ENABLED:
-                st.write("First, build your list of constraints. Then, set their ranges and generate the deck inside the form below.")
+                st.write("Configure and generate a deck template based on card roles and types.")
                 
+                # FIX: Moved Add buttons outside of any form
                 if 'func_constraints' not in st.session_state: st.session_state.func_constraints = {}
                 if 'type_constraints' not in st.session_state: st.session_state.type_constraints = {}
 
-                all_individual_categories = df['category'].str.split('|').explode()
-                func_categories_list = sorted([cat for cat in all_individual_categories.unique() if pd.notna(cat) and cat not in ['Uncategorized', '']])
-                type_categories_list = sorted(df['type'].unique())
+                all_individual_categories = df['category'].str.split('|').explode().dropna().unique()
+                func_categories_list = sorted([cat for cat in all_individual_categories if cat not in ['Uncategorized', '']])
+                type_categories_list = sorted([t for t in df['type'].unique() if pd.notna(t) and t != 'Unknown'])
 
                 with st.expander("Step 1: Configure Functional Constraints", expanded=True):
                     available_funcs = [f for f in func_categories_list if f not in st.session_state.func_constraints]
@@ -612,7 +647,7 @@ def main():
                     
                     for func in list(st.session_state.func_constraints.keys()):
                         col1, col2 = st.columns([4, 1])
-                        col1.write(f"- **{func}**")
+                        col1.write(f"• **{func}**")
                         if col2.button("Remove", key=f"del_func_{func}"):
                             del st.session_state.func_constraints[func]
                             st.rerun()
@@ -628,7 +663,7 @@ def main():
 
                     for ctype in list(st.session_state.type_constraints.keys()):
                         col1, col2 = st.columns([4, 1])
-                        col1.write(f"- **{ctype}**")
+                        col1.write(f"• **{ctype}**")
                         if col2.button("Remove", key=f"del_type_{ctype}"):
                             del st.session_state.type_constraints[ctype]
                             st.rerun()
@@ -660,7 +695,9 @@ def main():
                             must_haves = parse_decklist(template_must_haves)
                             base_candidates = df.drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name')
                             base_candidates['category_list'] = base_candidates['category'].str.split('|')
+                            
                             candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
+                            
                             candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
                             median_cmc = candidates_eff['cmc'].median()
                             candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc'].fillna(median_cmc) + 1)
@@ -672,9 +709,14 @@ def main():
                             pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
                             eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
                             
-                            t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
-                            with t1: st.dataframe(pop_df)
-                            with t2: st.dataframe(eff_df)
+                            st.session_state.pop_deck_result = pop_df
+                            st.session_state.eff_deck_result = eff_df
+                
+                if 'pop_deck_result' in st.session_state:
+                    t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
+                    with t1: st.dataframe(st.session_state.pop_deck_result)
+                    with t2: st.dataframe(st.session_state.eff_deck_result)
+
             else:
                 st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
 
@@ -764,11 +806,12 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
-    
-    if 'debug_html' in st.session_state and st.session_state.debug_html != "No HTML captured yet.":
+
+    if 'debug_html' in st.session_state:
         with st.expander("Scraped Page HTML for Debugging"):
             st.code(st.session_state.debug_html)
 
 if __name__ == "__main__":
-    # Removed the setup_complete check as Playwright is no longer needed
-    main()
+    if setup_complete:
+        main()
+}
