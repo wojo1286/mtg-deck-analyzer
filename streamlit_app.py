@@ -12,9 +12,6 @@ from copy import deepcopy
 import time
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-import subprocess
-import sys
 import urllib.parse
 import json
 from pathlib import Path
@@ -34,36 +31,13 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(layout="wide", page_title="MTG Deckbuilding Analysis Tool")
 
 # ===================================================================
-# 2. PLAYWRIGHT INSTALLATION (Only needed for Scryfall Tagger)
-# ===================================================================
-@st.cache_resource
-def setup_playwright():
-    """Installs Playwright's browser binary for the Scryfall Tagger."""
-    st.write("Verifying browser dependencies for Scryfall Tagger...")
-    try:
-        command = [sys.executable, "-m", "playwright", "install", "chromium"]
-        # Use a spinner for a cleaner UI during installation
-        with st.spinner("Installing Chromium browser (first run only)..."):
-            process = subprocess.run(
-                command, capture_output=True, text=True, check=True, timeout=600
-            )
-        st.success("Browser dependencies are ready!")
-        return True
-    except Exception as e:
-        st.error("Failed to install browser dependencies for Playwright.")
-        st.code(f"Error: {e}")
-        return False
-
-# This line executes the setup function once per session.
-setup_complete = setup_playwright()
-
-
-# ===================================================================
-# 3. DATA SCRAPING & PROCESSING FUNCTIONS
+# 2. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
 def parse_card_data_from_json(card_lists, deck_id, deck_source):
-    """Parses the __NEXT_DATA__ JSON to extract card data."""
+    """
+    Parses the __NEXT_DATA__ JSON to extract card data robustly.
+    """
     cards = []
     card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
     
@@ -73,10 +47,12 @@ def parse_card_data_from_json(card_lists, deck_id, deck_source):
     for card_group in card_lists:
         if not isinstance(card_group, dict) or 'cardviews' not in card_group:
             continue
+
         for card in card_group.get('cardviews', []):
             try:
                 name = card.get("name")
-                if not name: continue
+                if not name:
+                    continue
 
                 ctype_raw = card.get("primary_type")
                 ctype = ctype_raw if ctype_raw in card_types else card.get("type", "").split("—")[0].strip()
@@ -167,7 +143,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 else:
                     st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                 
-                # Re-introduced a moderate delay to avoid being rate-limited
+                # Re-introduced a moderate, randomized delay to avoid being rate-limited
                 time.sleep(random.uniform(0.4, 0.8))
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
@@ -176,6 +152,7 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     if not all_cards: 
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
+
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -365,54 +342,56 @@ def import_edhrec_categories():
     final_data = [{"name": name, "category": "|".join(sorted(list(tags)))} for name, tags in all_card_tags.items()]
     return pd.DataFrame(final_data)
 
-@st.cache_data(ttl=2592000) # Cache scraped tag data for 30 days
+@st.cache_data(ttl=2592000)
 def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
-    BASE_EXCLUDED_TAGS = { 'abrade', 'modal', 'single english word name' }
+    """Scrapes Scryfall Tagger without Playwright for speed and reliability."""
+    BASE_EXCLUDED_TAGS = {'abrade', 'modal', 'single english word name'}
     user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
     EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page()
-
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
         for i, name in enumerate(card_names):
-            progress_text = f"Scraping '{name}' ({i+1}/{len(card_names)})..."
+            progress_text = f"Scraping Tagger for '{name}' ({i+1}/{len(card_names)})..."
             progress_bar.progress((i + 1) / len(card_names), text=progress_text)
-            card_tags = set()
+            
             try:
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
-                response = requests.get(api_url)
-                response.raise_for_status() 
+                response = session.get(api_url)
+                response.raise_for_status()
                 card_data = response.json()
-                
+
                 tagger_url = card_data.get('scryfall_uri', '').replace('scryfall.com', 'tagger.scryfall.com')
                 if not tagger_url: continue
+
+                response = session.get(tagger_url, timeout=20)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, "lxml")
                 
-                page.goto(tagger_url, timeout=30000)
-                page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
-                html = page.content()
-                soup = BeautifulSoup(html, "lxml")
-                
-                all_tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
-                for tag in all_tags:
+                card_tags = set()
+                tags = soup.find_all('a', href=re.compile(r'^/tags/card/'))
+                for tag in tags:
                     tag_text = tag.get_text(strip=True)
                     if tag_text not in EXCLUDED_TAGS:
                         card_tags.add(tag_text.replace('-', ' ').capitalize())
                 
                 if card_tags:
                     scraped_data[name] = sorted(list(card_tags))
-                time.sleep(random.uniform(0.1, 0.25))
+                
+                time.sleep(random.uniform(0.1, 0.2))
+
             except Exception as e:
-                st.warning(f"Could not scrape '{name}'. (Error: {e})")
+                st.warning(f"Could not scrape Tagger for '{name}'. (Error: {e})")
                 continue
-        browser.close()
+    
     progress_bar.empty()
     if not scraped_data:
         st.error("Could not scrape any tags from the Scryfall Tagger.")
         return pd.DataFrame()
+
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
 
@@ -443,8 +422,7 @@ def main():
             st.session_state.scraped_df = df_raw
             
     elif data_source_option == "Scrape New Data":
-        commander_slug = st.sidebar.text_input("Enter Commander Slug", "ashling-the-pilgrim")
-        commander_slug_for_tools = commander_slug
+        st.session_state.commander_slug_input = st.sidebar.text_input("Enter Commander Slug", "ashling-the-pilgrim")
         bracket_options = {"All Decks": "", "Budget": "budget", "Upgraded": "upgraded", "Optimized": "optimized", "cEDH": "cedh"}
         selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
         selected_bracket_slug = bracket_options[selected_bracket_name]
@@ -452,7 +430,7 @@ def main():
         
         if st.sidebar.button("🚀 Start Scraping"):
             with st.spinner("Scraping in progress..."):
-                df_scraped, colors = run_scraper(commander_slug, deck_limit, bracket_slug=selected_bracket_slug, bracket_name=selected_bracket_name)
+                df_scraped, colors = run_scraper(st.session_state.commander_slug_input, deck_limit, bracket_slug=selected_bracket_slug, bracket_name=selected_bracket_name)
                 st.session_state.scraped_df = df_scraped
                 st.session_state.commander_colors = colors
                 st.rerun()
@@ -460,13 +438,13 @@ def main():
     if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
         df_raw = st.session_state.scraped_df
         st.sidebar.success("Scraped data is loaded.")
-        if data_source_option == "Scrape New Data":
-            commander_slug_for_tools = st.session_state.get('commander_slug_input', commander_slug_for_tools)
+        if data_source_option == "Scrape New Data" and 'commander_slug_input' in st.session_state:
+            commander_slug_for_tools = st.session_state.commander_slug_input
 
 
     st.sidebar.divider()
     if st.sidebar.button("🧹 Clear All Data & Reset"):
-        keys_to_clear = ['scraped_df', 'commander_colors', 'master_categories', 'junk_tags', 'imported_tags', 'func_constraints', 'type_constraints', 'debug_html']
+        keys_to_clear = ['scraped_df', 'commander_colors', 'master_categories', 'junk_tags', 'imported_tags', 'func_constraints', 'type_constraints', 'debug_html', 'pop_deck_result', 'eff_deck_result']
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
@@ -550,7 +528,7 @@ def main():
             main_top_n = st.slider('Top N Staples:', 5, 100, 25, 5)
             exclude_top = st.checkbox('Exclude Top N Staples', False)
         with col2:
-            unique_types = sorted([t for t in df['type'].unique() if t is not None and t != 'Unknown'])
+            unique_types = sorted([t for t in df['type'].unique() if pd.notna(t) and t != 'Unknown'])
             exclude_types = st.multiselect('Exclude Types:', options=unique_types)
 
         filtered_df = df.copy()
@@ -628,7 +606,6 @@ def main():
             if FUNCTIONAL_ANALYSIS_ENABLED:
                 st.write("Configure and generate a deck template based on card roles and types.")
                 
-                # FIX: Moved Add buttons outside of any form
                 if 'func_constraints' not in st.session_state: st.session_state.func_constraints = {}
                 if 'type_constraints' not in st.session_state: st.session_state.type_constraints = {}
 
@@ -806,7 +783,7 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
-
+    
     if 'debug_html' in st.session_state:
         with st.expander("Scraped Page HTML for Debugging"):
             st.code(st.session_state.debug_html)
@@ -814,4 +791,3 @@ def main():
 if __name__ == "__main__":
     if setup_complete:
         main()
-}
