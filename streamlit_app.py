@@ -364,17 +364,9 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
     Scrapes the Scryfall Tagger page for a given list of unique card names.
     Filters the results based on a user-provided list of junk tags.
     """
-    
-    # --- THIS IS THE NEW LOGIC ---
-    # We still keep a few base-level exclusions just in case
-    BASE_EXCLUDED_TAGS = {
-        'abrade', 'modal', 'single english word name'
-    }
-    
-    # Add the user's junk tags (lowercased) from the GSheet
+    BASE_EXCLUDED_TAGS = { 'abrade', 'modal', 'single english word name' }
     user_junk_tags = set(str(tag).lower() for tag in junk_tags_from_sheet)
     EXCLUDED_TAGS = BASE_EXCLUDED_TAGS.union(user_junk_tags)
-    # --- END OF NEW LOGIC ---
 
     scraped_data = {}
     progress_bar = st.progress(0, text="Initializing Scryfall Tagger scrape...")
@@ -389,7 +381,6 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
             card_tags = set()
 
             try:
-                # Step 1: Use Scryfall API to find the exact card data
                 encoded_name = urllib.parse.quote_plus(name)
                 api_url = f"https://api.scryfall.com/cards/named?fuzzy={encoded_name}"
                 
@@ -401,7 +392,6 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
                 collector_num = card_data['collector_number']
                 tagger_url = f"https://tagger.scryfall.com/card/{set_code}/{collector_num}"
 
-                # Step 2: Scrape the Tagger page
                 page.goto(tagger_url, timeout=30000)
                 page.wait_for_selector("a[href^='/tags/card/']", timeout=20000)
                 
@@ -416,7 +406,6 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
                         tags = tag_container.find_all('a', href=re.compile(r'^/tags/card/'))
                         for tag in tags:
                             tag_text = tag.get_text(strip=True)
-                            # This now checks against your dynamic list
                             if tag_text not in EXCLUDED_TAGS:
                                 card_tags.add(tag_text.replace('-', ' ').capitalize())
                 
@@ -446,6 +435,7 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
 
     final_data = [{"name": name, "category": "|".join(tags)} for name, tags in scraped_data.items()]
     return pd.DataFrame(final_data)
+
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
 # ===================================================================
@@ -460,10 +450,9 @@ def main():
         st.session_state.gsheets_connected = False
         st.sidebar.warning("Google Sheets connection failed. Category Editor will be disabled.")
 
-    # Initialize df_raw to None
     df_raw = None
 
-    # --- DATA SOURCE SELECTION (Moved up to define df_raw earlier) ---
+    # --- DATA SOURCE SELECTION ---
     st.sidebar.header("Deck Data Source")
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
     
@@ -475,20 +464,16 @@ def main():
             commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
             st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
             df_raw = pd.read_csv(decklist_file)
-            st.session_state.scraped_df = df_raw # Store in session state for consistency
+            st.session_state.scraped_df = df_raw
             
     elif data_source_option == "Scrape New Data":
-        # UI for scraping options
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
         
-        # --- NEW: Re-added Bracket and Budget Selection ---
         bracket_options = {
             "All Decks": "", "Budget": "budget", "Upgraded": "upgraded", 
             "Optimized": "optimized", "cEDH": "cedh"
         }
-        selected_bracket_name = st.sidebar.selectbox(
-            "Select Bracket Level:", options=list(bracket_options.keys())
-        )
+        selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
         selected_bracket_slug = bracket_options[selected_bracket_name]
 
         deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
@@ -504,10 +489,25 @@ def main():
                 st.session_state.commander_colors = colors
                 st.rerun()
 
-        if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
-            df_raw = st.session_state.scraped_df
-            st.sidebar.success("Scraped data is loaded.")
-            commander_slug_for_tools = commander_slug
+    if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
+        df_raw = st.session_state.scraped_df
+        st.sidebar.success("Scraped data is loaded.")
+        # This will get overwritten if a new scrape happens, which is correct.
+        commander_slug_for_tools = commander_slug if data_source_option == "Scrape New Data" else commander_slug_for_tools
+
+    # --- NEW: RESET BUTTON ---
+    st.sidebar.divider()
+    if st.sidebar.button("🧹 Clear All Data & Reset"):
+        keys_to_clear = [
+            'scraped_df', 'commander_colors', 'master_categories', 'junk_tags',
+            'imported_tags', 'func_constraints', 'type_constraints'
+        ]
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.success("All data cleared!")
+        time.sleep(1)
+        st.rerun()
 
     # ===============================================================
     # CARD CATEGORY DATA LOADING LOGIC
@@ -522,99 +522,69 @@ def main():
             st.toast(f"Successfully compiled categories for {len(edhrec_tags_df)} cards!", icon="✅")
             st.rerun()
 
-    # Load Google Sheets data if connected
     if 'master_categories' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading your categories from Google Sheets..."):
             st.session_state.master_categories = conn.read(worksheet="Categories")
 
-    # --- NEW: Load the Junk Tags sheet ---
     if 'junk_tags' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading junk tag list..."):
             try:
                 junk_df = conn.read(worksheet="JunkTags")
-                # Assumes your junk tags are in a column named 'tag'
                 if not junk_df.empty and 'tag' in junk_df.columns:
                     st.session_state.junk_tags = junk_df['tag'].dropna().tolist()
-                else:
-                    st.session_state.junk_tags = []
-            except Exception as e:
-                # Sheet might not exist, which is fine
+                else: st.session_state.junk_tags = []
+            except Exception:
                 st.sidebar.info("No 'JunkTags' worksheet found. Using defaults.")
                 st.session_state.junk_tags = []
-    # --- END OF NEW JUNK TAG LOGIC ---
 
-    # Button to scrape Tagger based on Google Sheet list
     if st.session_state.gsheets_connected:
         if st.sidebar.button("Scrape Tagger for GSheet Cards 🔎"):
             if 'master_categories' in st.session_state and not st.session_state.master_categories.empty:
                 unique_cards = st.session_state.master_categories['name'].dropna().unique().tolist()
-                
-                # --- THIS IS THE FIX ---
-                # Get the junk tag list from session state
                 junk_tags_list = st.session_state.get('junk_tags', [])
-                
-                with st.spinner(f"Scraping Scryfall Tagger for {len(unique_cards)} cards from your GSheet... This can take several minutes."):
-                    # Pass the junk list to the function
+                with st.spinner(f"Scraping Scryfall Tagger for {len(unique_cards)} cards..."):
                     tagger_df = scrape_scryfall_tagger(unique_cards, junk_tags_list)
-                # --- END OF FIX ---
-                
                 if not tagger_df.empty:
                     st.session_state.imported_tags = tagger_df
                     st.toast(f"Scraped tags for {len(tagger_df)} cards!", icon="✅")
                     st.rerun()
             else:
-                st.sidebar.warning("Your Google Sheet 'Categories' tab is empty. Add card names to it first.")
+                st.sidebar.warning("Your 'Categories' GSheet is empty. Add card names first.")
 
-    # Merging logic
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
-
-    if gsheets_df is None or gsheets_df.empty:
-        gsheets_df = pd.DataFrame(columns=['name', 'category'])
-    if imported_df is None or imported_df.empty:
-        imported_df = pd.DataFrame(columns=['name', 'category'])
+    
+    # Consolidate category merging logic
+    if gsheets_df is None: gsheets_df = pd.DataFrame(columns=['name', 'category'])
+    if imported_df is None: imported_df = pd.DataFrame(columns=['name', 'category'])
 
     if not gsheets_df.empty or not imported_df.empty:
-        st.sidebar.info("Combining Imported Tags with your Google Sheet.")
-        
-        merged_df = pd.merge(
-            gsheets_df, 
-            imported_df, 
-            on='name', 
-            how='outer', 
-            suffixes=('_gsheet', '_imported')
-        )
-        
+        merged_df = pd.merge(gsheets_df, imported_df, on='name', how='outer', suffixes=('_gsheet', '_imported'))
         merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
         merged_df['category_imported'] = merged_df['category_imported'].fillna('')
-        
         merged_df['category'] = np.where(
             merged_df['category_gsheet'] != '', 
             merged_df['category_gsheet'], 
             merged_df['category_imported']
         )
-        
         categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
-        
+        st.sidebar.info("Combined GSheet & Imported tags.")
     elif not gsheets_df.empty:
-        st.sidebar.info("Using your categories from Google Sheets.")
         categories_df_master = gsheets_df
+        st.sidebar.info("Using GSheet categories.")
     elif not imported_df.empty:
-        st.sidebar.info("Using Imported Tags as a base.")
         categories_df_master = imported_df
+        st.sidebar.info("Using Imported tags.")
 
     st.sidebar.divider()
-    # ===============================================================
-    # END OF CATEGORY LOGIC
-    # ===============================================================
-
-
+    
     # --- MAIN APP DISPLAY LOGIC ---
     if df_raw is not None:
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
+        # ... (rest of the analysis display code is unchanged) ...
         st.header("Dashboard & Analysis")
         col1, col2 = st.columns(2)
         with col1:
@@ -652,12 +622,10 @@ def main():
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty:
             with st.expander("Functional Analysis"):
                 func_df = spells_df.copy()
-                # Handle potential NaN values in 'category' before splitting
                 func_df['category'] = func_df['category'].fillna('Uncategorized')
                 func_df['category_list'] = func_df['category'].str.split('|')
                 func_df = func_df.explode('category_list').loc[lambda d: (d['category_list'] != 'Uncategorized') & (d['category_list'] != '')]
                 
-                # ADDED CHECK: Only show charts if func_df is not empty
                 if not func_df.empty:
                     fc1, fc2 = st.columns(2)
                     with fc1:
@@ -665,7 +633,6 @@ def main():
                     with fc2:
                         box_fig = px.box(func_df, x='category_list', y='cmc', title='CMC Distribution by Function'); st.plotly_chart(box_fig, use_container_width=True)
                 else:
-                    # Show a message if there's no data to plot
                     st.info("No categorized card functions found to display in the analysis.")
 
         with st.expander("Personal Deckbuilding Tools", expanded=True):
@@ -694,77 +661,70 @@ def main():
                     if avg_deck:
                         st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.commander_colors) if st.session_state.commander_colors else 'None'}")
                         st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
-
+            
+            # --- START: DECK TEMPLATE GENERATOR (RESTRUCTURED) ---
             st.subheader("Generate a Deck Template")
             if FUNCTIONAL_ANALYSIS_ENABLED:
+                st.write("First, build your list of constraints. Then, set their ranges and generate the deck inside the form below.")
+                
+                # Initialize session state if they don't exist
+                if 'func_constraints' not in st.session_state: st.session_state.func_constraints = {}
+                if 'type_constraints' not in st.session_state: st.session_state.type_constraints = {}
+
+                # Prepare clean, individual category lists
+                all_individual_categories = df['category'].str.split('|').explode()
+                func_categories_list = sorted([cat for cat in all_individual_categories.unique() if pd.notna(cat) and cat not in ['Uncategorized', '']])
+                type_categories_list = sorted(df['type'].unique())
+
+                # --- PART 1: CONSTRAINT CONFIGURATION (OUTSIDE THE FORM) ---
+                with st.expander("Step 1: Configure Functional Constraints", expanded=True):
+                    available_funcs = [f for f in func_categories_list if f not in st.session_state.func_constraints]
+                    if available_funcs:
+                        col1, col2 = st.columns([3, 1])
+                        new_func = col1.selectbox("Add functional category:", options=available_funcs, key="new_func_select", index=None, placeholder="Choose a function...")
+                        if col2.button("Add Function", key="add_func_btn") and new_func:
+                            st.session_state.func_constraints[new_func] = (8, 12) if new_func in ['Ramp', 'Card Draw'] else (2, 8)
+                            st.rerun()
+                    
+                    for func, value in list(st.session_state.func_constraints.items()):
+                        col1, col2 = st.columns([4, 1])
+                        col1.write(f"- **{func}**")
+                        if col2.button("Remove", key=f"del_func_{func}"):
+                            del st.session_state.func_constraints[func]
+                            st.rerun()
+
+                with st.expander("Step 2: Configure Card Type Constraints"):
+                    available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
+                    if available_types:
+                        col1, col2 = st.columns([3, 1])
+                        new_type = col1.selectbox("Add card type:", options=available_types, key="new_type_select", index=None, placeholder="Choose a type...")
+                        if col2.button("Add Type", key="add_type_btn") and new_type:
+                            st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
+                            st.rerun()
+
+                    for ctype, value in list(st.session_state.type_constraints.items()):
+                        col1, col2 = st.columns([4, 1])
+                        col1.write(f"- **{ctype}**")
+                        if col2.button("Remove", key=f"del_type_{ctype}"):
+                            del st.session_state.type_constraints[ctype]
+                            st.rerun()
+                
+                # --- PART 2: FORM FOR SUBMISSION ---
                 with st.form(key='template_form'):
-                    st.write("Define your deck structure with the constraints below.")
+                    st.write("---")
+                    st.write("**Step 3: Set Ranges and Generate**")
                     template_must_haves = st.text_area("Must-Include Cards (one per line):", key="template_must_haves")
                     
-                    # --- NEW: DYNAMIC CONSTRAINT UI ---
-                    # Initialize session state for constraints if they don't exist
-                    if 'func_constraints' not in st.session_state:
-                        st.session_state.func_constraints = {} # e.g., {'Ramp': (8, 12)}
-                    if 'type_constraints' not in st.session_state:
-                        st.session_state.type_constraints = {} # e.g., {'Creature': (25, 35)}
-
-                    # Prepare clean, individual category lists for dropdowns
-                    all_individual_categories = df['category'].str.split('|').explode()
-                    func_categories_list = sorted([
-                        cat for cat in all_individual_categories.unique() 
-                        if pd.notna(cat) and cat not in ['Uncategorized', '']
-                    ])
-                    type_categories_list = sorted(df['type'].unique())
-
-                    with st.expander("Functional Constraints", expanded=True):
-                        # UI to add a new functional constraint
-                        available_funcs = [f for f in func_categories_list if f not in st.session_state.func_constraints]
-                        if available_funcs:
-                            col1, col2 = st.columns([3, 1])
-                            new_func = col1.selectbox("Add functional category:", options=available_funcs, key="new_func_select", index=None, placeholder="Choose a function...")
-                            if col2.button("Add Function", key="add_func_btn") and new_func:
-                                st.session_state.func_constraints[new_func] = (8, 12) if new_func in ['Ramp', 'Card Draw'] else (2, 8)
-                                st.rerun()
-                        else:
-                            st.write("All available functional categories have been added.")
-                        
-                        st.write("---")
-                        # Display and manage existing functional constraints
-                        for func, value in list(st.session_state.func_constraints.items()):
-                            col1, col2, col3 = st.columns([2, 3, 1])
-                            col1.write(f"**{func}**")
-                            # Update the session state directly when the slider changes
-                            st.session_state.func_constraints[func] = col2.slider(f"Range for {func}", 0, 40, value, key=f"slider_func_{func}", label_visibility="collapsed")
-                            if col3.button("🗑️", key=f"del_func_{func}"):
-                                del st.session_state.func_constraints[func]
-                                st.rerun()
-
-                    with st.expander("Card Type Constraints"):
-                        # UI to add a new type constraint
-                        available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
-                        if available_types:
-                            col1, col2 = st.columns([3, 1])
-                            new_type = col1.selectbox("Add card type:", options=available_types, key="new_type_select", index=None, placeholder="Choose a type...")
-                            if col2.button("Add Type", key="add_type_btn") and new_type:
-                                st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
-                                st.rerun()
-                        else:
-                            st.write("All available card types have been added.")
-
-                        st.write("---")
-                        # Display and manage existing type constraints
-                        for ctype, value in list(st.session_state.type_constraints.items()):
-                            col1, col2, col3 = st.columns([2, 3, 1])
-                            col1.write(f"**{ctype}**")
-                            st.session_state.type_constraints[ctype] = col2.slider(f"Range for {ctype}", 0, 60, value, key=f"slider_type_{ctype}", label_visibility="collapsed")
-                            if col3.button("🗑️", key=f"del_type_{ctype}"):
-                                del st.session_state.type_constraints[ctype]
-                                st.rerun()
+                    # Sliders for selected constraints are INSIDE the form
+                    for func, value in st.session_state.func_constraints.items():
+                        st.session_state.func_constraints[func] = st.slider(f"Range for '{func}'", 0, 40, value, key=f"slider_func_{func}")
+                    
+                    for ctype, value in st.session_state.type_constraints.items():
+                        st.session_state.type_constraints[ctype] = st.slider(f"Range for '{ctype}'", 0, 60, value, key=f"slider_type_{ctype}")
                     
                     submitted = st.form_submit_button("📋 Generate Deck With Constraints")
 
                     if submitted:
-                        # Build the constraints dictionary from session state before running the algorithm
                         constraints = {'functions': {}, 'types': {}}
                         for func, (min_val, max_val) in st.session_state.func_constraints.items():
                             constraints['functions'][func] = {'target': [min_val, max_val], 'current': 0}
@@ -773,12 +733,9 @@ def main():
 
                         with st.spinner("Generating decklists..."):
                             must_haves = parse_decklist(template_must_haves)
-                            
                             base_candidates = df.drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name')
                             base_candidates['category_list'] = base_candidates['category'].str.split('|')
-                            
                             candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
-                            
                             candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
                             median_cmc = candidates_eff['cmc'].median()
                             candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc'].fillna(median_cmc) + 1)
@@ -791,38 +748,24 @@ def main():
                             eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
                             
                             t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
-                            with t1:
-                                st.dataframe(pop_df)
-                            with t2:
-                                st.dataframe(eff_df)
+                            with t1: st.dataframe(pop_df)
+                            with t2: st.dataframe(eff_df)
             else:
                 st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
+            # --- END: DECK TEMPLATE GENERATOR ---
 
         if st.session_state.gsheets_connected:
             with st.expander("Card Category Editor", expanded=False):
+                # ... (Category Editor code is unchanged) ...
                 st.info("Here you can add or edit categories for all unique cards found in the current dataset. Changes will be saved to your Google Sheet.")
-                
-                # The unique cards are from the scraped data (df)
                 unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
-                
-                # Merge these unique cards with the master list to show them in the editor
-                # categories_df_master now contains the combined (GSheet + Imported) tags
                 editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
                 
                 st.write("Edit categories below (use '|' to separate multiple functions):")
-                edited_df = st.data_editor(
-                    editor_df,
-                    key='category_editor',
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    hide_index=True
-                )
+                edited_df = st.data_editor(editor_df, key='category_editor', num_rows="dynamic", use_container_width=True, hide_index=True)
                 
                 if st.button("💾 Save Changes to Google Sheet"):
                     with st.spinner("Saving to Google Sheet..."):
-                        # This part correctly saves the *editor's* content, which is what we want.
-                        # We merge the editor_df (what you see) with the master_categories (GSheet state)
-                        # to update the master list.
                         updated_master = pd.concat([
                             st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
                             edited_df
@@ -837,6 +780,7 @@ def main():
                         st.rerun()
 
         with st.expander("Advanced Synergy Tools", expanded=False):
+            # ... (Advanced Synergy Tools code is unchanged) ...
             st.subheader("Card Inspector")
             all_spells_list = sorted(spells_df['name'].unique())
             if all_spells_list:
