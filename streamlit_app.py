@@ -73,55 +73,58 @@ setup_complete = setup_playwright()
 def parse_table(html, deck_id, deck_source):
     """
     Parses the HTML of a deck table to extract card data using a more
-    robust method based on relative positions of elements.
+    robust, multi-layered method.
     """
     soup = BeautifulSoup(html, "html.parser")
     cards = []
     card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
     
     for table in soup.find_all("table"):
-        # Skip the header row by starting from the second `tr`
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
             if len(tds) < 5:
                 continue
 
-            # Find name, which is the most reliable anchor
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
             
             if not name:
                 continue
 
-            # Find CMC
             cmc_el = tr.find("span", class_="float-right")
             cmc = cmc_el.get_text(strip=True) if cmc_el else None
-
-            # Find Price (search backwards from the end of the row)
             price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
 
-            # --- NEW ROBUST TYPE FINDING LOGIC ---
+            # --- NEW MULTI-LAYERED TYPE FINDING LOGIC ---
             ctype = None
-            try:
-                # The type is in the <td> immediately following the <td> that contains the card name link.
+
+            # Method 1: Find name's cell, then check the next cell. (Most reliable)
+            if name_el:
                 name_td = name_el.find_parent("td")
                 if name_td:
                     type_td = name_td.find_next_sibling("td")
                     if type_td:
-                        # Clean the text and check if it's a known type
                         possible_type = type_td.get_text(strip=True).split("—")[0].strip()
                         if possible_type in card_types:
-                             ctype = possible_type
-            except Exception:
-                # Fallback to the old method if the new one fails for any reason
-                ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in card_types), None)
+                            ctype = possible_type
+
+            # Method 2 (Fallback): Check a specific column index (5th column).
+            if not ctype and len(tds) > 4:
+                possible_type = tds[4].get_text(strip=True).split("—")[0].strip()
+                if possible_type in card_types:
+                    ctype = possible_type
             
+            # Method 3 (Final Fallback): Brute-force search all cells.
+            if not ctype:
+                ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in card_types), None)
+
             cards.append({
                 "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
                 "name": name, "type": ctype, "price": price
             })
             
     return cards
+
 
 @st.cache_data
 def get_commander_color_identity(commander_slug):
