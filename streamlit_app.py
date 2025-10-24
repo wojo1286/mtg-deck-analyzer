@@ -74,6 +74,7 @@ TYPE_KEYWORDS = [
     "Creature", "Instant", "Sorcery", "Artifact", "Enchantment",
     "Planeswalker", "Land", "Battle", "Tribal", "Conspiracy",
     "Phenomenon", "Plane", "Scheme", "Vanguard", "Dungeon"
+    "Planeswalker", "Land", "Battle"
 ]
 
 
@@ -181,6 +182,12 @@ def _extract_type_from_row(tr, tds, type_idx):
     # Final fallback: inspect the whole row text for any recognizable keyword.
     row_text = tr.get_text(" ", strip=True) if tr else ""
     return _extract_primary_type(row_text)
+    cleaned = text.strip()
+    lowered = cleaned.lower()
+    for keyword in TYPE_KEYWORDS:
+        if keyword.lower() in lowered:
+            return keyword
+    return cleaned if cleaned else None
 
 
 def parse_table(html, deck_id, deck_source):
@@ -205,6 +212,7 @@ def parse_table(html, deck_id, deck_source):
         data_rows = rows[1:] if has_header else rows
 
         for tr in data_rows:
+        for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
             if not tds:
                 continue
@@ -220,6 +228,19 @@ def parse_table(html, deck_id, deck_source):
                 cmc = cmc_el.get_text(strip=True) if cmc_el else None
 
             ctype = _extract_type_from_row(tr, tds, type_idx)
+            raw_type = None
+            if type_idx is not None and len(tds) > type_idx:
+                raw_type = tds[type_idx].get_text(strip=True)
+            else:
+                raw_type = next(
+                    (
+                        td.get_text(strip=True)
+                        for td in tds
+                        if _extract_primary_type(td.get_text(strip=True)) is not None
+                    ),
+                    None,
+                )
+            ctype = _extract_primary_type(raw_type)
 
             price = None
             if price_idx is not None and len(tds) > price_idx:
