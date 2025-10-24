@@ -340,7 +340,7 @@ def get_commander_color_identity(commander_slug):
 
 def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bracket_name="All Decks"):
     st.info(f"🔍 Fetching deck metadata for '{commander_slug}' (Bracket: {bracket_name})...")
-    
+
     base_url = f"https://json.edhrec.com/pages/decks/{commander_slug}"
     if bracket_slug: base_url += f"/{bracket_slug}"
     if budget_slug: base_url += f"/{budget_slug}"
@@ -367,14 +367,14 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     all_cards = []
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         for i, row in df_meta.iterrows():
             deck_id, deck_url = row["urlhash"], row["deckpreview_url"]
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
-            
+
             try:
                 page.goto(deck_url, timeout=90000)
 
@@ -397,34 +397,48 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                     except Exception as e:
                         st.warning(f"Could not enable 'Type' column for {deck_url}. Skipping. Error: {e}")
                         continue # Skip to the 'finally' block
-                
-                # --- STEP 4: Parse the table ---
+
+                # --- STEP 4: Wait for DATA ROWS to appear ---
+                # This is the new wait to ensure the card rows are loaded
+                st.write(f"[{i+1}] Waiting for data rows (td elements)...")
+                try:
+                    # Wait specifically for the first data cell (<td>) in the table body
+                    page.wait_for_selector("table tbody tr td", timeout=15000)
+                    st.write(f"[{i+1}] ...Data rows are visible.")
+                except Exception as e:
+                    st.error(f"Data rows (<td> elements) did not appear for deck {deck_url}. Error: {e}")
+                    # Add screenshot here if needed
+                    # screenshot_path = f"debug_data_rows_fail_{deck_id}.png"
+                    # page.screenshot(path=screenshot_path)
+                    # st.image(screenshot_path, caption=f"DEBUG: Failed waiting for data rows on {deck_url}")
+                    st.warning("Stopping app for debugging.")
+                    st.stop()
+
+                # --- STEP 5: Parse the table ---
                 html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
-                
-                # This function will now print debug info and stop IF IT FAILS
-                cards = parse_table(html, deck_id, deck_source) 
 
-                if cards: 
+                # This function will print debug info and stop IF IT FAILS
+                cards = parse_table(html, deck_id, deck_source)
+
+                if cards:
                     all_cards.extend(cards)
                 else:
-                    # This is the message you saw
                     st.warning(f"No cards parsed for {deck_url}, though page loaded and filters applied.")
-                    # The debug logic is now inside parse_table()
-                        
+
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
-            
+
             finally:
                 # This sleep will ALWAYS run
                 time.sleep(random.uniform(0.5, 1.5))
-            
+
             progress_bar.progress((i + 1) / len(df_meta))
-        
+
         browser.close()
-    
-    if not all_cards: 
+
+    if not all_cards:
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
