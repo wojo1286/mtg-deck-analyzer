@@ -492,10 +492,10 @@ def main():
     if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
         df_raw = st.session_state.scraped_df
         st.sidebar.success("Scraped data is loaded.")
-        # This will get overwritten if a new scrape happens, which is correct.
-        commander_slug_for_tools = commander_slug if data_source_option == "Scrape New Data" else commander_slug_for_tools
+        if data_source_option == "Scrape New Data":
+            commander_slug_for_tools = commander_slug
 
-    # --- NEW: RESET BUTTON ---
+    # --- RESET BUTTON ---
     st.sidebar.divider()
     if st.sidebar.button("🧹 Clear All Data & Reset"):
         keys_to_clear = [
@@ -551,13 +551,19 @@ def main():
             else:
                 st.sidebar.warning("Your 'Categories' GSheet is empty. Add card names first.")
 
+    # --- MODIFIED: Robust category loading and merging ---
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
     
-    # Consolidate category merging logic
-    if gsheets_df is None: gsheets_df = pd.DataFrame(columns=['name', 'category'])
-    if imported_df is None: imported_df = pd.DataFrame(columns=['name', 'category'])
+    # Gracefully handle DataFrames that are None or lack the 'name' column
+    if gsheets_df is None or 'name' not in gsheets_df.columns:
+        if gsheets_df is not None and not gsheets_df.empty:
+            st.warning("Your 'Categories' Google Sheet is missing the 'name' column and will be ignored.")
+        gsheets_df = pd.DataFrame(columns=['name', 'category'])
+
+    if imported_df is None or 'name' not in imported_df.columns:
+        imported_df = pd.DataFrame(columns=['name', 'category'])
 
     if not gsheets_df.empty or not imported_df.empty:
         merged_df = pd.merge(gsheets_df, imported_df, on='name', how='outer', suffixes=('_gsheet', '_imported'))
@@ -570,12 +576,7 @@ def main():
         )
         categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
         st.sidebar.info("Combined GSheet & Imported tags.")
-    elif not gsheets_df.empty:
-        categories_df_master = gsheets_df
-        st.sidebar.info("Using GSheet categories.")
-    elif not imported_df.empty:
-        categories_df_master = imported_df
-        st.sidebar.info("Using Imported tags.")
+    # --- END MODIFICATION ---
 
     st.sidebar.divider()
     
@@ -584,7 +585,6 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
-        # ... (rest of the analysis display code is unchanged) ...
         st.header("Dashboard & Analysis")
         col1, col2 = st.columns(2)
         with col1:
@@ -657,26 +657,22 @@ def main():
                 with st.spinner("Generating average deck..."):
                     decks_in_range = deck_prices[(deck_prices >= price_range[0]) & (deck_prices <= price_range[1])].index
                     filtered_price_df = df[df['deck_id'].isin(decks_in_range)]
-                    avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.commander_colors)
+                    avg_deck = generate_average_deck(filtered_price_df, commander_slug_for_tools, st.session_state.get('commander_colors', []))
                     if avg_deck:
-                        st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.commander_colors) if st.session_state.commander_colors else 'None'}")
+                        st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.get('commander_colors', ['None']))}")
                         st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
             
-            # --- START: DECK TEMPLATE GENERATOR (RESTRUCTURED) ---
             st.subheader("Generate a Deck Template")
             if FUNCTIONAL_ANALYSIS_ENABLED:
                 st.write("First, build your list of constraints. Then, set their ranges and generate the deck inside the form below.")
                 
-                # Initialize session state if they don't exist
                 if 'func_constraints' not in st.session_state: st.session_state.func_constraints = {}
                 if 'type_constraints' not in st.session_state: st.session_state.type_constraints = {}
 
-                # Prepare clean, individual category lists
                 all_individual_categories = df['category'].str.split('|').explode()
                 func_categories_list = sorted([cat for cat in all_individual_categories.unique() if pd.notna(cat) and cat not in ['Uncategorized', '']])
                 type_categories_list = sorted(df['type'].unique())
 
-                # --- PART 1: CONSTRAINT CONFIGURATION (OUTSIDE THE FORM) ---
                 with st.expander("Step 1: Configure Functional Constraints", expanded=True):
                     available_funcs = [f for f in func_categories_list if f not in st.session_state.func_constraints]
                     if available_funcs:
@@ -686,7 +682,7 @@ def main():
                             st.session_state.func_constraints[new_func] = (8, 12) if new_func in ['Ramp', 'Card Draw'] else (2, 8)
                             st.rerun()
                     
-                    for func, value in list(st.session_state.func_constraints.items()):
+                    for func in list(st.session_state.func_constraints.keys()):
                         col1, col2 = st.columns([4, 1])
                         col1.write(f"- **{func}**")
                         if col2.button("Remove", key=f"del_func_{func}"):
@@ -702,20 +698,21 @@ def main():
                             st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
                             st.rerun()
 
-                    for ctype, value in list(st.session_state.type_constraints.items()):
+                    for ctype in list(st.session_state.type_constraints.keys()):
                         col1, col2 = st.columns([4, 1])
                         col1.write(f"- **{ctype}**")
                         if col2.button("Remove", key=f"del_type_{ctype}"):
                             del st.session_state.type_constraints[ctype]
                             st.rerun()
                 
-                # --- PART 2: FORM FOR SUBMISSION ---
                 with st.form(key='template_form'):
                     st.write("---")
                     st.write("**Step 3: Set Ranges and Generate**")
                     template_must_haves = st.text_area("Must-Include Cards (one per line):", key="template_must_haves")
                     
-                    # Sliders for selected constraints are INSIDE the form
+                    if not st.session_state.func_constraints and not st.session_state.type_constraints:
+                        st.info("Add functional or card type constraints above to set their ranges here.")
+
                     for func, value in st.session_state.func_constraints.items():
                         st.session_state.func_constraints[func] = st.slider(f"Range for '{func}'", 0, 40, value, key=f"slider_func_{func}")
                     
@@ -752,11 +749,9 @@ def main():
                             with t2: st.dataframe(eff_df)
             else:
                 st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
-            # --- END: DECK TEMPLATE GENERATOR ---
 
         if st.session_state.gsheets_connected:
             with st.expander("Card Category Editor", expanded=False):
-                # ... (Category Editor code is unchanged) ...
                 st.info("Here you can add or edit categories for all unique cards found in the current dataset. Changes will be saved to your Google Sheet.")
                 unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
                 editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
@@ -766,6 +761,9 @@ def main():
                 
                 if st.button("💾 Save Changes to Google Sheet"):
                     with st.spinner("Saving to Google Sheet..."):
+                        if 'master_categories' not in st.session_state or st.session_state.master_categories.empty:
+                            st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
+                            
                         updated_master = pd.concat([
                             st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
                             edited_df
@@ -780,7 +778,6 @@ def main():
                         st.rerun()
 
         with st.expander("Advanced Synergy Tools", expanded=False):
-            # ... (Advanced Synergy Tools code is unchanged) ...
             st.subheader("Card Inspector")
             all_spells_list = sorted(spells_df['name'].unique())
             if all_spells_list:
