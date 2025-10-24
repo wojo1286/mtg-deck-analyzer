@@ -317,22 +317,54 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 page.goto(deck_url, timeout=90000)
                 page.click('button[data-rr-ui-event-key="table"]')
                 
-                page.wait_for_selector("table tbody tr", timeout=20000)
-                page.wait_for_timeout(500)
+                # Wait for the table to be populated
+                try:
+                    page.wait_for_selector("table tbody tr a[href*='cards.edhrec.com']", timeout=20000)
+                    page.wait_for_timeout(500) # Give JS a final moment
+                except Exception as e:
+                    st.error(f"Data table did not load for {deck_url}. Error: {e}")
+                    # Save a screenshot on failure so we can see what went wrong
+                    page.screenshot(path="debug_fail_screenshot.png")
+                    st.image("debug_fail_screenshot.png", caption="Screenshot of Failed Page Load")
+                    st.stop()
 
+                # ---------------------------------------------------------
+                # --- START DEBUGGING CODE ---
+                # ---------------------------------------------------------
+
+                # 1. Take a screenshot to confirm table view
+                screenshot_path = "debug_screenshot.png"
+                page.screenshot(path=screenshot_path)
+                st.info(f"📸 Debug screenshot saved to '{screenshot_path}'.")
+                st.image(screenshot_path, caption="Page Screenshot - Is this in Table View?")
+
+                # 2. Save the raw HTML to a file
                 html = page.content()
-                src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
-                deck_source = src_el["href"] if src_el else "Unknown"
-                cards = parse_table(html, deck_id, deck_source)
+                html_file_path = "debug_page.html"
+                with open(html_file_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                st.info(f"📄 Raw HTML saved to '{html_file_path}'.")
 
-                if cards: 
-                    all_cards.extend(cards)
+                # 3. Parse and show the *first* card's data
+                cards = parse_table(html, deck_id, deck_source)
+                
+                if cards:
+                    st.subheader("Data from first parsed card:")
+                    st.json(cards[0])
+                    st.info(f"Successfully parsed {len(cards)} cards.")
                 else:
-                    st.warning(f"No cards parsed for {deck_url}, though page loaded.")
-                        
-                time.sleep(random.uniform(0.5, 1.5))
+                    st.error("No cards were parsed from the HTML.")
+                
+                # 4. Stop the app
+                st.warning("Debugging enabled. Stopping app after one deck. Check the files and data above.")
+                st.stop()
+                
+                # --- END DEBUGGING CODE ---
+                # ---------------------------------------------------------
+
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
+            
             progress_bar.progress((i + 1) / len(df_meta))
         browser.close()
     
