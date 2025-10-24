@@ -325,26 +325,47 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                     page.click('button:has-text("Card Filters")', timeout=5000)
                     page.wait_for_selector('div[class*="dropdown-menu show"]', timeout=5000)
                 except Exception as e:
-                    st.warning(f"Could not open 'Card Filters' for {deck_url}. Skipping. Error: {e}")
-                    continue
+                    # --- DEBUGGING STEP FOR 'Card Filters' ---
+                    st.error(f"Could not open 'Card Filters' for {deck_url}. Error: {e}")
+                    
+                    # Take screenshot at the moment of failure
+                    screenshot_path = "debug_filters_fail.png"
+                    page.screenshot(path=screenshot_path)
+                    st.image(screenshot_path, caption=f"DEBUG: Failed to find 'Card Filters' on {deck_url}")
+
+                    # Save HTML
+                    html_file_path = "debug_filters_fail.html"
+                    with open(html_file_path, "w", encoding="utf-8") as f:
+                        f.write(page.content())
+                    st.info(f"📄 Raw HTML saved to '{html_file_path}'. Inspect this file to see why the button wasn't found.")
+                    
+                    st.warning("Stopping app for debugging. Check screenshot and HTML file.")
+                    st.stop()
+                    # --- END DEBUGGING ---
 
                 # --- STEP 3: Click the 'Type' checkbox ---
                 try:
                     type_button_selector = 'div[class*="dropdown-menu show"] button:has(span:text-is("Type"))'
-                    
-                    # Check if "Type" is disabled (it has the "X" span)
                     is_type_disabled = page.is_visible(f'{type_button_selector}:has(span:text-is("X"))')
                     
                     if is_type_disabled:
                         page.click(type_button_selector, timeout=5000)
                     
-                    # Click *outside* the dropdown to close it (e.g., on a main header)
                     page.click('h2:has-text("Creature")', timeout=5000) 
-                    page.wait_for_timeout(1000) # IMPORTANT: Wait for table to re-render
+                    page.wait_for_timeout(1000)
                 
                 except Exception as e:
-                    st.warning(f"Could not click 'Type' checkbox for {deck_url}. Skipping. Error: {e}")
-                    continue
+                    # --- DEBUGGING STEP FOR 'Type' CLICK ---
+                    st.error(f"Could not click 'Type' checkbox for {deck_url}. Error: {e}")
+                    
+                    # Take screenshot at the moment of failure
+                    screenshot_path = "debug_type_click_fail.png"
+                    page.screenshot(path=screenshot_path)
+                    st.image(screenshot_path, caption=f"DEBUG: Failed to click 'Type' checkbox on {deck_url}")
+                    
+                    st.warning("Stopping app for debugging. Check screenshot.")
+                    st.stop()
+                    # --- END DEBUGGING ---
 
                 # --- STEP 4: Wait for the *final* table with all data ---
                 try:
