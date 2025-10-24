@@ -70,57 +70,41 @@ setup_complete = setup_playwright()
 # 3. DATA SCRAPING & PROCESSING FUNCTIONS
 # ===================================================================
 
-def parse_table(html, deck_id, deck_source):
+def parse_card_data_from_json(card_lists, deck_id, deck_source):
     """
-    Parses the HTML of a deck table to extract card data using a multi-layered method.
+    Parses the __NEXT_DATA__ JSON to extract card data robustly.
     """
-    soup = BeautifulSoup(html, "html.parser")
     cards = []
-    card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
-    
-    for table in soup.find_all("table"):
-        for tr in table.find_all("tr")[1:]:
-            tds = tr.find_all("td")
-            if len(tds) < 5: continue
+    for card_group in card_lists:
+        for card in card_group.get('cardviews', []):
+            try:
+                name = card.get("name")
+                if not name:
+                    continue
 
-            name_el = tr.find("a")
-            name = name_el.get_text(strip=True) if name_el else None
-            
-            if not name: continue
+                ctype = card.get("primary_type")
+                cmc = card.get("cmc")
+                
+                # Extract price from nested dictionary, format with '$'
+                price_val = card.get("prices", {}).get("cardkingdom", {}).get("price")
+                price = f"${price_val}" if price_val else None
 
-            cmc_el = tr.find("span", class_="float-right")
-            cmc = cmc_el.get_text(strip=True) if cmc_el else None
-            price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
-
-            ctype = None
-            # Method 1: Check cell immediately after the name cell
-            if name_el:
-                name_td = name_el.find_parent("td")
-                if name_td:
-                    type_td = name_td.find_next_sibling("td")
-                    if type_td:
-                        possible_type = type_td.get_text(strip=True).split("—")[0].strip()
-                        if possible_type in card_types:
-                            ctype = possible_type
-            
-            # Method 2: Check the 5th cell (index 4) as a fallback
-            if not ctype and len(tds) > 4:
-                possible_type = tds[4].get_text(strip=True).split("—")[0].strip()
-                if possible_type in card_types:
-                    ctype = possible_type
-            
-            # Method 3: Brute force search all cells
-            if not ctype:
-                ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in card_types), None)
-
-            cards.append({
-                "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
-                "name": name, "type": ctype, "price": price
-            })
+                cards.append({
+                    "deck_id": deck_id,
+                    "deck_source": deck_source,
+                    "cmc": cmc,
+                    "name": name,
+                    "type": ctype,
+                    "price": price
+                })
+            except (KeyError, TypeError):
+                # Skip card if data is malformed
+                continue
     return cards
 
 @st.cache_data
 def get_commander_color_identity(commander_slug):
+    """Fetches the commander's color identity from EDHREC's JSON endpoint."""
     try:
         url = f"https://json.edhrec.com/pages/commanders/{commander_slug}.json"
         response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -160,7 +144,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # --- DEBUGGING: Initialize HTML holder in session state ---
     st.session_state.debug_html = "No HTML captured yet."
 
     with sync_playwright() as p:
@@ -171,21 +154,32 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
             status_text.text(f"[{i+1}/{len(df_meta)}] Fetching {deck_url}")
             try:
                 page.goto(deck_url, timeout=90000)
-                page.click('button[data-rr-ui-event-key="table"]')
-                page.wait_for_selector("table tbody tr", timeout=20000)
-                page.wait_for_timeout(500)
-
+                page.wait_for_selector('button[data-rr-ui-event-key="table"]', timeout=20000)
                 html = page.content()
-                # --- DEBUGGING: Capture the HTML of the first page ---
+
                 if i == 0:
                     st.session_state.debug_html = html
 
-                src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
-                deck_source = src_el["href"] if src_el else "Unknown"
-                cards = parse_table(html, deck_id, deck_source)
+                soup = BeautifulSoup(html, "html.parser")
+                
+                # --- NEW: Extract data directly from the JSON script tag ---
+                script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+                if not script_tag:
+                    st.warning(f"Could not find data script for {deck_url}. Skipping.")
+                    continue
+                
+                json_data = json.loads(script_tag.string)
+                card_lists = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("cardlists", [])
 
-                if cards: all_cards.extend(cards)
-                else: st.warning(f"No cards parsed for {deck_url}, though page loaded.")
+                src_el = soup.find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
+                deck_source = src_el["href"] if src_el else "Unknown"
+                
+                cards = parse_card_data_from_json(card_lists, deck_id, deck_source)
+
+                if cards: 
+                    all_cards.extend(cards)
+                else:
+                    st.warning(f"No cards parsed for {deck_url}, though page loaded.")
                         
                 time.sleep(random.uniform(0.5, 1.5))
             except Exception as e:
@@ -197,7 +191,6 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
         st.error("Scraping complete, but no cards were parsed."); return None, []
     st.success("✅ Scraping complete!"); return pd.DataFrame(all_cards), color_identity
 
-# ... (The rest of the script from the previous version remains exactly the same) ...
 
 @st.cache_data
 def clean_and_prepare_data(_df, _categories_df=None):
@@ -556,7 +549,6 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
         st.header("Dashboard & Analysis")
-        # ... (rest of main() is unchanged)
         col1, col2 = st.columns(2)
         with col1:
             price_cap = st.number_input('Price cap ($):', min_value=0.0, value=5.0, step=0.5)
@@ -807,9 +799,9 @@ def main():
 
     else:
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
-
+    
     # --- DEBUGGING: Display the captured HTML ---
-    if 'debug_html' in st.session_state and st.session_state.debug_html:
+    if 'debug_html' in st.session_state and st.session_state.debug_html != "No HTML captured yet.":
         with st.expander("Scraped Page HTML for Debugging"):
             st.code(st.session_state.debug_html)
 
