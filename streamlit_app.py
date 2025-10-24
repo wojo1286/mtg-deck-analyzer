@@ -317,84 +317,47 @@ def run_scraper(commander_slug, deck_limit, bracket_slug="", budget_slug="", bra
                 page.goto(deck_url, timeout=90000)
 
                 # --- STEP 1: Click the 'Table' tab ---
-                st.write(f"[{i+1}] Clicking 'Table' tab...")
                 page.click('button[data-rr-ui-event-key="table"]')
                 page.wait_for_selector("div[class*='TableView_table']", timeout=10000)
-                st.write(f"[{i+1}] ...Table tab is visible.")
 
                 # --- STEP 2: Check if 'Type' column is already visible ---
-                st.write(f"[{i+1}] Checking for 'Type' column header...")
                 type_header_selector = 'th:has-text("Type")'
                 is_type_visible = page.is_visible(type_header_selector)
 
                 # --- STEP 3: If 'Type' is NOT visible, enable it ---
                 if not is_type_visible:
-                    st.write(f"[{i+1}] ...'Type' column not found. Clicking 'Edit Columns'...")
                     try:
                         # Click 'Edit Columns' to open dropdown
                         page.click('button:has-text("Edit Columns")', timeout=5000)
                         page.wait_for_selector('div[class*="dropdown-menu show"]', timeout=5000)
-                        st.write(f"[{i+1}] ...'Edit Columns' dropdown is open.")
 
                         # Click the 'Type' button inside the dropdown
                         type_button_selector = 'div[class*="dropdown-menu show"] button:has-text("Type")'
                         page.click(type_button_selector, timeout=5000)
-                        st.write(f"[{i+1}] ...Clicked 'Type'.")
                         
-                        # --- THIS IS THE FIX ---
-                        # Instead of a blind sleep, wait for the 'Type' header to appear in the DOM
-                        st.write(f"[{i+1}] ...Waiting for 'Type' header to re-appear...")
+                        # Wait *only* for the 'Type' header to appear
                         page.wait_for_selector(type_header_selector, timeout=10000)
-                        st.write(f"[{i+1}] ...'Type' header is now visible.")
-                        # --- END FIX ---
                     
                     except Exception as e:
-                        st.error(f"Could not enable 'Type' column for {deck_url}. Error: {e}")
-                        screenshot_path = "debug_enable_type_fail.png"
-                        page.screenshot(path=screenshot_path)
-                        st.image(screenshot_path, caption=f"DEBUG: Failed to click 'Edit Columns' or 'Type' on {deck_url}")
-                        st.warning("Stopping app for debugging. Check screenshot.")
-                        st.stop()
-                else:
-                    st.write(f"[{i+1}] ...'Type' column is already visible. Skipping clicks.")
-
-                # --- STEP 4: Wait for the *final* table data to load ---
-                st.write(f"[{i+1}] Waiting for final table data (card links)...")
-                try:
-                    page.wait_for_selector("table tbody tr a[href*='cards.edhrec.com']", timeout=20000)
-                except Exception as e:
-                    # --- THIS IS THE NEW DEBUGGING ---
-                    st.error(f"Final table data did not load for {deck_url}. Error: {e}")
-                    
-                    screenshot_path = "debug_final_table_fail.png"
-                    page.screenshot(path=screenshot_path)
-                    st.image(screenshot_path, caption=f"DEBUG: 'Type' column *should* be visible, but table data (card links) did not load on {deck_url}")
-                    
-                    st.warning("Stopping app for debugging. Check screenshot.")
-                    st.stop()
-                    # --- END DEBUGGING ---
-
-                # --- STEP 5: Parse the table (and stop for debug) ---
-                st.write(f"[{i+1}] Parsing table...")
-                html = page.content()
+                        st.warning(f"Could not enable 'Type' column for {deck_url}. Skipping. Error: {e}")
+                        continue # Skip to the next deck
                 
-                screenshot_path = "debug_final_view.png"
-                page.screenshot(path=screenshot_path)
-                st.image(screenshot_path, caption=f"DEBUG: Final view for {deck_url}. 'Type' column should be visible.")
+                # --- STEP 4: (REMOVED) ---
+                # We no longer wait for the card links, as the table
+                # is already populated.
 
+                # --- STEP 5: Parse the table ---
+                html = page.content()
                 src_el = BeautifulSoup(html, "html.parser").find("a", href=lambda x: x and any(d in x for d in ["moxfield", "archidekt"]))
                 deck_source = src_el["href"] if src_el else "Unknown"
                 cards = parse_table(html, deck_id, deck_source)
 
-                if cards:
-                    st.subheader("Data from first parsed card:")
-                    st.json(cards[0])
-                    st.info(f"Successfully parsed {len(cards)} cards.")
+                if cards: 
+                    all_cards.extend(cards)
                 else:
-                    st.error("No cards were parsed from the HTML.")
-                
-                st.warning("Debugging enabled. Stopping app after one deck. Check the files and data above.")
-                st.stop() # Stop after the first successful deck
+                    st.warning(f"No cards parsed for {deck_url}, though page loaded and filters applied.")
+                        
+                time.sleep(random.uniform(0.5, 1.5))
                 
             except Exception as e:
                 status_text.text(f"⚠️ Skipping deck {deck_id} due to error: {e}")
