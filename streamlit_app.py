@@ -71,24 +71,56 @@ setup_complete = setup_playwright()
 # ===================================================================
 
 def parse_table(html, deck_id, deck_source):
+    """
+    Parses the HTML of a deck table to extract card data using a more
+    robust method based on relative positions of elements.
+    """
     soup = BeautifulSoup(html, "html.parser")
     cards = []
+    card_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]
+    
     for table in soup.find_all("table"):
+        # Skip the header row by starting from the second `tr`
         for tr in table.find_all("tr")[1:]:
             tds = tr.find_all("td")
             if len(tds) < 5:
                 continue
+
+            # Find name, which is the most reliable anchor
             name_el = tr.find("a")
             name = name_el.get_text(strip=True) if name_el else None
+            
+            if not name:
+                continue
+
+            # Find CMC
             cmc_el = tr.find("span", class_="float-right")
             cmc = cmc_el.get_text(strip=True) if cmc_el else None
-            ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land", "Battle"]), None)
+
+            # Find Price (search backwards from the end of the row)
             price = next((td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")), None)
-            if name:
-                cards.append({
-                    "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
-                    "name": name, "type": ctype, "price": price
-                })
+
+            # --- NEW ROBUST TYPE FINDING LOGIC ---
+            ctype = None
+            try:
+                # The type is in the <td> immediately following the <td> that contains the card name link.
+                name_td = name_el.find_parent("td")
+                if name_td:
+                    type_td = name_td.find_next_sibling("td")
+                    if type_td:
+                        # Clean the text and check if it's a known type
+                        possible_type = type_td.get_text(strip=True).split("—")[0].strip()
+                        if possible_type in card_types:
+                             ctype = possible_type
+            except Exception:
+                # Fallback to the old method if the new one fails for any reason
+                ctype = next((td.get_text(strip=True) for td in tds if td.get_text(strip=True) in card_types), None)
+            
+            cards.append({
+                "deck_id": deck_id, "deck_source": deck_source, "cmc": cmc,
+                "name": name, "type": ctype, "price": price
+            })
+            
     return cards
 
 @st.cache_data
@@ -551,12 +583,10 @@ def main():
             else:
                 st.sidebar.warning("Your 'Categories' GSheet is empty. Add card names first.")
 
-    # --- MODIFIED: Robust category loading and merging ---
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
     
-    # Gracefully handle DataFrames that are None or lack the 'name' column
     if gsheets_df is None or 'name' not in gsheets_df.columns:
         if gsheets_df is not None and not gsheets_df.empty:
             st.warning("Your 'Categories' Google Sheet is missing the 'name' column and will be ignored.")
@@ -576,7 +606,6 @@ def main():
         )
         categories_df_master = merged_df[['name', 'category']].sort_values('name').reset_index(drop=True)
         st.sidebar.info("Combined GSheet & Imported tags.")
-    # --- END MODIFICATION ---
 
     st.sidebar.divider()
     
