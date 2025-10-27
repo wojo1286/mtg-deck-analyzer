@@ -1314,7 +1314,7 @@ def main():
                      st.warning("Type data missing, cannot configure type constraints.")
 
 
-with st.expander("Step 1: Configure Functional Constraints", expanded=True):
+            with st.expander("Step 1: Configure Functional Constraints", expanded=True):
                     # --- MODIFICATION: Use active list and allow adding ---
                     active_categories = st.session_state.get('active_func_categories', [])
                     
