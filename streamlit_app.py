@@ -1404,7 +1404,7 @@ def main():
                         if col2.button("Remove", key=f"del_type_{ctype}"):
                             del st.session_state.type_constraints[ctype]
                             st.rerun()
-            with st.form(key='template_form'):
+with st.form(key='template_form'):
                 st.write("---")
                 st.write("**Step 3: Define Must-Haves, Exclusions, Ranges, and Generate**")
 
@@ -1425,6 +1425,7 @@ def main():
                 if not active_categories_in_form:
                      st.info("No functional categories selected in the 'Average Deck Statistics' section.")
 
+                # THIS IS THE CORRECT AND ONLY LOOP FOR FUNCTIONAL SLIDERS
                 for func in sorted(active_categories_in_form): # Iterate through ACTIVE list
                     # Initialize constraint if it doesn't exist for this active category
                     if func not in st.session_state.func_constraints:
@@ -1460,13 +1461,10 @@ def main():
                     current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15) # Default range
                     c1, c2, c3 = st.columns([4, 1, 1])
                     with c1:
-                         # Use unique key for the slider
                          new_range = st.slider(f"'{ctype}' count", 0, 60, current_value, key=f"slider_type_{ctype}")
                     with c2:
-                         # Use unique key for the number input
                          min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
                     with c3:
-                         # Use unique key for the number input
                          max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
                     # Update session state if number inputs change the value
                     if (min_val, max_val) != new_range:
@@ -1476,15 +1474,15 @@ def main():
                          st.session_state.type_constraints[ctype] = new_range
                 # --- End Loop 2 ---
 
-                # --- REMOVED DUPLICATE LOOP FOR FUNCTIONAL CONSTRAINTS ---
-
-                # --- Submit Button (Ensure it's inside the 'with st.form' block) ---
+                # --- Submit Button ---
                 submitted = st.form_submit_button("📋 Generate Deck With Constraints")
 
                 # --- Logic that runs on submission ---
                 if submitted:
+                    # ** CORRECTED INDENTATION **
                     if POP_ALL.empty or 'name' not in POP_ALL.columns or 'count' not in POP_ALL.columns:
-                         st.error("Popularity data is missing or invalid. Cannot generate deck template.")
+                        st.error("Popularity data is missing or invalid. Cannot generate deck template.")
+                    # ** CORRECTED INDENTATION **
                     else:
                         constraints = {'functions': {}, 'types': {}}
                         # Populate constraints dict only from the ACTIVE categories present in func_constraints
@@ -1539,6 +1537,7 @@ def main():
                                 t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
                                 with t1: st.dataframe(pop_df)
                                 with t2: st.dataframe(eff_df)
+                            # ** CORRECTED INDENTATION **
                             else:
                                 st.error("Required columns ('name', 'category', 'cmc') not found in data. Cannot generate template.")
             # --- End st.form block ---
