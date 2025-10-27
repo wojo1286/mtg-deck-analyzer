@@ -384,24 +384,17 @@ def clean_and_prepare_data(_df, _categories_df=None):
     
     return dfc, functional_analysis_enabled, num_decks, pop_all
 
-#@st.cache_data
+@st.cache_data # Make sure this decorator is uncommented
 def calculate_average_stats(_df, num_decks):
     """Calculates average statistics across all decks in the DataFrame,
        inferring basic land counts."""
     if _df.empty or num_decks == 0:
         return {}
 
-    st.write("--- Debugging calculate_average_stats ---") # DEBUG START
-
     stats = {}
     df_copy = _df.copy()
-
-    # --- Convert CMC and inspect ---
-    st.write("Raw 'cmc' column sample:", df_copy['cmc'].head().to_list())
+    # Convert CMC to numeric early, coercing errors to NaN
     df_copy['cmc_filled'] = pd.to_numeric(df_copy['cmc'], errors='coerce')
-    st.write("Coerced 'cmc_filled' sample:", df_copy['cmc_filled'].head().to_list())
-    st.write("'cmc_filled' value counts (initial):", df_copy['cmc_filled'].value_counts(dropna=False).to_dict())
-
 
     # --- Determine Primary Type ---
     primary_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Land", "Planeswalker", "Battle"]
@@ -409,29 +402,17 @@ def calculate_average_stats(_df, num_decks):
 
     # --- Infer Basic Lands per Deck ---
     deck_known_counts = df_copy.groupby('deck_id').size().reset_index(name='known_cards')
-    deck_known_counts['inferred_basics'] = (100 - deck_known_counts['known_cards']).clip(lower=0)
+    deck_known_counts['inferred_basics'] = (100 - deck_known_counts['known_cards']).clip(lower=0) # Ensure non-negative
     avg_basic_count = deck_known_counts['inferred_basics'].mean()
 
     # --- Calculate Non-Land CMC Stats ---
     # 1. Filter out lands
     non_land_df = df_copy[df_copy['primary_type'] != 'Land'].copy()
-    st.write(f"DataFrame shape after filtering out Lands: {non_land_df.shape}")
-    st.write("'cmc_filled' in non_land_df value counts:", non_land_df['cmc_filled'].value_counts(dropna=False).to_dict())
-
-    # 2. Drop rows where CMC is still NaN
+    # 2. Drop rows where CMC is still NaN (e.g., failed parsing for a non-land card)
     cmc_valid_non_land_df = non_land_df.dropna(subset=['cmc_filled'])
-    st.write(f"DataFrame shape after dropping NaN CMCs: {cmc_valid_non_land_df.shape}")
-    st.write("'cmc_filled' in valid non_land_df value counts:", cmc_valid_non_land_df['cmc_filled'].value_counts(dropna=False).to_dict())
 
-
-    # Calculate Mean/Median
-    avg_cmc_non_land = cmc_valid_non_land_df['cmc_filled'].mean() if not cmc_valid_non_land_df.empty else 0
-    median_cmc_non_land = cmc_valid_non_land_df['cmc_filled'].median() if not cmc_valid_non_land_df.empty else 0
-    stats['avg_cmc_non_land'] = avg_cmc_non_land
-    stats['median_cmc_non_land'] = median_cmc_non_land
-    st.write(f"Calculated Avg CMC (Non-Land): {avg_cmc_non_land}") # DEBUG
-    st.write(f"Calculated Median CMC (Non-Land): {median_cmc_non_land}") # DEBUG
-
+    stats['avg_cmc_non_land'] = cmc_valid_non_land_df['cmc_filled'].mean() if not cmc_valid_non_land_df.empty else 0
+    stats['median_cmc_non_land'] = cmc_valid_non_land_df['cmc_filled'].median() if not cmc_valid_non_land_df.empty else 0
 
     # --- Card Type Counts (Based on Known Cards) ---
     type_counts = df_copy.groupby('deck_id')['primary_type'].value_counts().unstack(fill_value=0)
@@ -465,6 +446,7 @@ def calculate_average_stats(_df, num_decks):
     else:
         stats['avg_type_percentages'] = {t: 0 for t in valid_counts.keys()}
 
+
     # --- Price Stats (if available) ---
     if 'price_clean' in df_copy.columns:
         df_copy['price_filled'] = pd.to_numeric(df_copy['price_clean'], errors='coerce').fillna(0)
@@ -478,7 +460,6 @@ def calculate_average_stats(_df, num_decks):
     cmc_dist = cmc_valid_non_land_df['cmc_filled'].value_counts().sort_index()
     stats['cmc_distribution'] = cmc_dist.to_dict()
 
-    st.write("--- End Debugging calculate_average_stats ---") # DEBUG END
     return stats
 
 def popularity_table(frame: pd.DataFrame) -> pd.DataFrame:
