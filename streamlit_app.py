@@ -393,60 +393,52 @@ def calculate_average_stats(_df, num_decks):
 
     stats = {}
     df_copy = _df.copy()
+    df_copy['cmc_filled'] = pd.to_numeric(df_copy['cmc'], errors='coerce') # Convert CMC first
 
-    # --- Infer Basic Lands per Deck ---
-    # Count known (non-inferred) cards per deck_id
-    deck_known_counts = df_copy.groupby('deck_id').size().reset_index(name='known_cards')
-    # Calculate inferred basics assuming 100 cards total per deck
-    deck_known_counts['inferred_basics'] = 100 - deck_known_counts['known_cards']
-    # Calculate the average number of inferred basics across all decks
-    avg_basic_count = deck_known_counts['inferred_basics'].mean()
-    # --- End Basic Land Inference ---
-
-    # --- Basic Counts & CMC ---
-    total_cards_in_df = len(df_copy) # Note: This includes only known cards
-    stats['avg_known_cards_per_deck'] = total_cards_in_df / num_decks
-    df_copy['cmc_filled'] = pd.to_numeric(df_copy['cmc'], errors='coerce')
-    # Calculate CMC stats only on non-land cards found in the df
-    non_land_df_for_cmc = df_copy.dropna(subset=['cmc_filled']) # Drop lands/cards with no CMC
-    stats['avg_cmc_non_land'] = non_land_df_for_cmc['cmc_filled'].mean()
-    stats['median_cmc_non_land'] = non_land_df_for_cmc['cmc_filled'].median()
-
-    # --- Card Type Counts (Based on Known Cards) ---
+    # --- Determine Primary Type ---
     primary_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Land", "Planeswalker", "Battle"]
     df_copy['primary_type'] = df_copy['type'].apply(lambda x: next((ptype for ptype in primary_types if ptype in str(x)), 'Other'))
 
+    # --- Infer Basic Lands per Deck ---
+    deck_known_counts = df_copy.groupby('deck_id').size().reset_index(name='known_cards')
+    deck_known_counts['inferred_basics'] = 100 - deck_known_counts['known_cards']
+    avg_basic_count = deck_known_counts['inferred_basics'].mean()
+
+    # --- Calculate Non-Land CMC Stats ---
+    # Filter out lands *before* calculating CMC stats
+    non_land_df = df_copy[df_copy['primary_type'] != 'Land'].copy()
+    # Fill any remaining NaNs in cmc_filled for non-lands (e.g., if parsing failed) with 0 before averaging
+    non_land_df['cmc_filled'].fillna(0, inplace=True)
+    stats['avg_cmc_non_land'] = non_land_df['cmc_filled'].mean() if not non_land_df.empty else 0
+    stats['median_cmc_non_land'] = non_land_df['cmc_filled'].median() if not non_land_df.empty else 0
+
+    # --- Card Type Counts (Based on Known Cards) ---
     type_counts = df_copy.groupby('deck_id')['primary_type'].value_counts().unstack(fill_value=0)
     avg_type_counts = type_counts.mean()
 
     # --- Adjust Land Counts using Inferred Basics ---
     basic_land_names = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']
+    # Calculate avg non-basics from the original df_copy, not the filtered non_land_df
     land_df = df_copy[df_copy['primary_type'] == 'Land']
     non_basic_land_df = land_df[~land_df['name'].isin(basic_land_names)]
-
     avg_non_basic_count = non_basic_land_df.groupby('deck_id').size().mean() if not non_basic_land_df.empty else 0
-    # The new average total land count is the sum of avg non-basics and avg inferred basics
     avg_total_land_count = avg_non_basic_count + avg_basic_count
 
     stats['avg_total_lands'] = avg_total_land_count
     stats['avg_non_basic_lands'] = avg_non_basic_count
-    stats['avg_basic_lands'] = max(0, avg_basic_count) # Use the directly calculated average
+    stats['avg_basic_lands'] = max(0, avg_basic_count)
 
-    # Update the avg_type_counts dictionary to reflect the inferred total lands
+    # Update avg_type_counts dictionary
     avg_type_counts['Land'] = avg_total_land_count
-    # Remove individual basic land names if they were counted separately before
     for basic in basic_land_names:
          if basic in avg_type_counts:
-             del avg_type_counts[basic] # Avoid double counting
+             del avg_type_counts[basic]
 
     stats['avg_type_counts'] = avg_type_counts.to_dict()
 
     # --- Calculate Percentages based on 100 total cards ---
-    total_cards_assumed = 100 # Use 100 for percentage calculation
+    total_cards_assumed = 100
     stats['avg_type_percentages'] = {t: (c / total_cards_assumed) * 100 for t, c in avg_type_counts.items()}
-    # Add basics percentage if needed, though it's implicitly included in 'Land' now
-    # stats['avg_type_percentages']['Basic Land'] = (avg_basic_count / total_cards_assumed) * 100
-
 
     # --- Price Stats (if available) ---
     if 'price_clean' in df_copy.columns:
@@ -458,7 +450,8 @@ def calculate_average_stats(_df, num_decks):
         stats['max_deck_price'] = deck_total_prices.max()
 
     # --- CMC Distribution (for plotting - Non-Land Known Cards) ---
-    cmc_dist = non_land_df_for_cmc['cmc_filled'].value_counts().sort_index()
+    # Use the non_land_df already created
+    cmc_dist = non_land_df['cmc_filled'].value_counts().sort_index()
     stats['cmc_distribution'] = cmc_dist.to_dict()
 
     return stats
