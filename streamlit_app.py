@@ -1367,7 +1367,7 @@ def main():
                             st.rerun()
                     # --- END MODIFICATION ---
 
-                with st.expander("Step 2: Configure Card Type Constraints"):
+            with st.expander("Step 2: Configure Card Type Constraints"):
                     available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
                     if available_types:
                         col1, col2 = st.columns([3, 1])
