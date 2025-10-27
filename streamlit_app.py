@@ -384,6 +384,67 @@ def clean_and_prepare_data(_df, _categories_df=None):
     
     return dfc, functional_analysis_enabled, num_decks, pop_all
 
+@st.cache_data
+def calculate_average_stats(_df, num_decks):
+    """Calculates average statistics across all decks in the DataFrame."""
+    if _df.empty or num_decks == 0:
+        return {}
+
+    stats = {}
+    df_copy = _df.copy()
+
+    # --- Basic Counts & CMC ---
+    total_cards = len(df_copy)
+    stats['avg_cards_per_deck'] = total_cards / num_decks
+    # Ensure 'cmc' is numeric, fill NaNs (e.g., for lands) appropriately if needed
+    df_copy['cmc_filled'] = pd.to_numeric(df_copy['cmc'], errors='coerce')
+    stats['avg_cmc_overall'] = df_copy['cmc_filled'].mean() # Includes NaNs as 0 implicitly if not filled
+    stats['median_cmc_overall'] = df_copy['cmc_filled'].median()
+
+    # --- Card Type Counts ---
+    # Define primary types to report
+    primary_types = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Land", "Planeswalker", "Battle"]
+    df_copy['primary_type'] = df_copy['type'].apply(lambda x: next((ptype for ptype in primary_types if ptype in str(x)), 'Other'))
+
+    type_counts = df_copy.groupby('deck_id')['primary_type'].value_counts().unstack(fill_value=0)
+    avg_type_counts = type_counts.mean()
+    stats['avg_type_counts'] = avg_type_counts.to_dict()
+
+    # Calculate percentages
+    total_avg_cards = sum(avg_type_counts)
+    if total_avg_cards > 0:
+        stats['avg_type_percentages'] = {t: (c / total_avg_cards) * 100 for t, c in avg_type_counts.items()}
+    else:
+        stats['avg_type_percentages'] = {t: 0 for t in avg_type_counts.keys()}
+
+    # --- Land Counts ---
+    basic_land_names = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']
+    land_df = df_copy[df_copy['primary_type'] == 'Land']
+    non_basic_land_df = land_df[~land_df['name'].isin(basic_land_names)]
+
+    avg_non_basic_count = non_basic_land_df.groupby('deck_id').size().mean() if not non_basic_land_df.empty else 0
+    avg_total_land_count = avg_type_counts.get('Land', 0)
+    avg_basic_count = avg_total_land_count - avg_non_basic_count
+
+    stats['avg_total_lands'] = avg_total_land_count
+    stats['avg_non_basic_lands'] = avg_non_basic_count
+    stats['avg_basic_lands'] = max(0, avg_basic_count) # Ensure non-negative
+
+    # --- Price Stats (if available) ---
+    if 'price_clean' in df_copy.columns:
+        df_copy['price_filled'] = pd.to_numeric(df_copy['price_clean'], errors='coerce').fillna(0)
+        deck_total_prices = df_copy.groupby('deck_id')['price_filled'].sum()
+        stats['avg_deck_price'] = deck_total_prices.mean()
+        stats['median_deck_price'] = deck_total_prices.median()
+        stats['min_deck_price'] = deck_total_prices.min()
+        stats['max_deck_price'] = deck_total_prices.max()
+
+    # --- CMC Distribution (for plotting) ---
+    cmc_dist = df_copy[df_copy['primary_type'] != 'Land']['cmc_filled'].value_counts().sort_index()
+    stats['cmc_distribution'] = cmc_dist.to_dict()
+
+    return stats
+
 def popularity_table(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty: return pd.DataFrame(columns=['name', 'count', 'avg_price', 'avg_cmc', 'type'])
     return (frame.groupby('name')
@@ -405,40 +466,170 @@ def build_cococcurrence(source_df: pd.DataFrame, topN: int, exclude_staples_n: i
     pivot = pd.crosstab(f['deck_id'], f['name']).reindex(columns=top_cards, fill_value=0)
     return pivot.T.dot(pivot)
 
-def _fill_deck_slots(candidates_df, constraints, initial_decklist=[]):
-    decklist, used_cards = list(initial_decklist), set(initial_decklist)
-    
-    initial_df = candidates_df[candidates_df['name'].isin(initial_decklist)].drop_duplicates(subset=['name'])
-    for _, card in initial_df.iterrows():
-        if card['type'] in constraints['types']: constraints['types'][card['type']]['current'] += 1
-        if isinstance(card.get('category_list'), list):
-            for func in card['category_list']:
-                if func in constraints['functions']: 
-                    constraints['functions'][func]['current'] += 1
+def _fill_deck_slots(candidates_df, constraints, initial_decklist=[], lands_df=pd.DataFrame(), color_identity=[]):
+    """
+    Fills a decklist aiming for 100 cards, respecting constraints, must-haves,
+    and attempting to add a reasonable land count.
 
-    for _, card in candidates_df.iterrows():
-        if len(decklist) >= 100 or card['name'] in used_cards: continue
-        can_add = True
-        card_type = card['type']
-        if card_type in constraints['types'] and constraints['types'][card_type]['current'] >= constraints['types'][card_type]['target'][1]: can_add = False
-        if can_add and isinstance(card.get('category_list'), list):
-            for func in card['category_list']:
-                if func in constraints['functions'] and constraints['functions'][func]['current'] >= constraints['functions'][func]['target'][1]: can_add = False; break
-        if can_add:
-            decklist.append(card['name']); used_cards.add(card['name'])
-            if card_type in constraints['types']: constraints['types'][card_type]['current'] += 1
-            if isinstance(card.get('category_list'), list):
-                best_func, max_need = '', -1
-                for func in card['category_list']:
+    Args:
+        candidates_df: DataFrame of non-land cards to choose from, sorted by priority.
+        constraints: Dict defining target counts for functions and types.
+        initial_decklist: List of cards that must be included.
+        lands_df: DataFrame of non-basic land cards.
+        color_identity: List of commander's color identity letters (e.g., ['W', 'U']).
+
+    Returns:
+        A tuple containing:
+          - list: The generated 100-card decklist.
+          - dict: The final state of the constraints dictionary.
+    """
+    decklist, used_cards = list(initial_decklist), set(initial_decklist)
+    basic_land_names = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']
+
+    # --- Initialize constraints based on initial decklist ---
+    # Ensure initial cards are in candidates_df to get their type/category
+    initial_cards_info = candidates_df[candidates_df['name'].isin(initial_decklist)].drop_duplicates(subset=['name'])
+    if not initial_cards_info.empty:
+         # Need 'category_list' if not already present
+         if 'category_list' not in initial_cards_info.columns and 'category' in initial_cards_info.columns:
+              initial_cards_info['category_list'] = initial_cards_info['category'].astype(str).str.split('|')
+         
+         for _, card in initial_cards_info.iterrows():
+            if 'types' in constraints and card.get('type') in constraints['types']:
+                constraints['types'][card['type']]['current'] += 1
+            if 'functions' in constraints and isinstance(card.get('category_list'), list):
+                for func in card.get('category_list', []):
                     if func in constraints['functions']:
-                       need = constraints['functions'][func]['target'][1] - constraints['functions'][func]['current']
-                       if need > max_need: max_need = need; best_func = func
-                if best_func: constraints['functions'][best_func]['current'] += 1
-    remaining = 100 - len(decklist)
-    if remaining > 0:
-        fillers = candidates_df[~candidates_df['name'].isin(used_cards)].head(remaining)
+                        constraints['functions'][func]['current'] += 1
+
+    # --- Fill Non-Land Slots based on Constraints ---
+    target_non_land_count = 63 # Aim for roughly 63 non-lands initially (adjust as needed)
+    
+    # Add candidate cards respecting constraints
+    for _, card in candidates_df.iterrows():
+        if len(decklist) >= target_non_land_count or card['name'] in used_cards:
+            continue
+        # Skip basic lands that might be in candidates (though they shouldn't be)
+        if card['name'] in basic_land_names:
+             continue
+
+        can_add = True
+        card_type = card.get('type')
+        card_cats = card.get('category_list', []) if isinstance(card.get('category_list'), list) else []
+
+        # Check type constraints
+        if 'types' in constraints and card_type in constraints['types']:
+            if constraints['types'][card_type]['current'] >= constraints['types'][card_type]['target'][1]:
+                can_add = False
+
+        # Check function constraints (only if type constraint passed)
+        if can_add and 'functions' in constraints:
+            # Check if adding this card *would* violate *any* function maximum
+            violates_func = False
+            for func in card_cats:
+                 if func in constraints['functions']:
+                      if constraints['functions'][func]['current'] >= constraints['functions'][func]['target'][1]:
+                           violates_func = True
+                           break
+            if violates_func:
+                 # Check if we *need* this card for a function minimum that isn't met
+                 needed_for_min = False
+                 for func in card_cats:
+                      if func in constraints['functions']:
+                           if constraints['functions'][func]['current'] < constraints['functions'][func]['target'][0]:
+                                needed_for_min = True
+                                break
+                 if not needed_for_min:
+                      can_add = False # Can't add if it violates a max and isn't needed for a min
+
+        if can_add:
+            decklist.append(card['name'])
+            used_cards.add(card['name'])
+            # Update counts
+            if 'types' in constraints and card_type in constraints['types']:
+                constraints['types'][card_type]['current'] += 1
+            if 'functions' in constraints:
+                # Prioritize incrementing the count for the function most needed
+                best_func_to_increment = None
+                max_need = -1 # Needs below minimum are highest priority
+                
+                for func in card_cats:
+                    if func in constraints['functions']:
+                         current = constraints['functions'][func]['current']
+                         target_min = constraints['functions'][func]['target'][0]
+                         target_max = constraints['functions'][func]['target'][1]
+                         
+                         # Calculate 'need': highest for unmet minimums, then closeness to maximum
+                         need_score = 0
+                         if current < target_min:
+                              need_score = (target_min - current) + 100 # Prioritize minimums
+                         elif current < target_max:
+                              need_score = target_max - current # Closer to max is lower need
+                         else: # Already at or over max
+                              need_score = -1
+
+                         if need_score > max_need:
+                              max_need = need_score
+                              best_func_to_increment = func
+
+                if best_func_to_increment:
+                    constraints['functions'][best_func_to_increment]['current'] += 1
+
+
+    # --- Fill Remaining Non-Land Slots (Ignoring Constraints) ---
+    remaining_non_land = target_non_land_count - len(decklist)
+    if remaining_non_land > 0:
+        fillers = candidates_df[~candidates_df['name'].isin(used_cards)].head(remaining_non_land)
         decklist.extend(fillers['name'].tolist())
-    return decklist, constraints
+        used_cards.update(fillers['name'].tolist())
+
+    # --- Add Lands ---
+    target_land_count = 37 # Aim for 37 lands (100 total cards)
+    current_non_land_count = len(decklist) # Should be target_non_land_count now
+    needed_lands = 100 - current_non_land_count
+
+    # Add Non-Basic Lands first (using popularity from provided lands_df)
+    num_non_basics_to_add = 0
+    if not lands_df.empty and 'name' in lands_df.columns:
+        # Calculate approximate non-basic count based on average decks (e.g., ~25-30)
+        avg_non_basic_target = min(needed_lands, 28) # Adjust this target number as needed
+        
+        pop_non_basics = popularity_table(lands_df) # Assumes lands_df is pre-filtered
+        top_lands = pop_non_basics[~pop_non_basics['name'].isin(used_cards)].head(avg_non_basic_target)
+        
+        decklist.extend(top_lands['name'].tolist())
+        used_cards.update(top_lands['name'].tolist())
+        num_non_basics_to_add = len(top_lands)
+
+    # Add Basic Lands
+    num_basics_to_add = needed_lands - num_non_basics_to_add
+    if num_basics_to_add > 0:
+        basic_land_map = {'W': 'Plains', 'U': 'Island', 'B': 'Swamp', 'R': 'Mountain', 'G': 'Forest'}
+        # Use provided color identity, default to Wastes if none or invalid
+        commander_basics = [basic_land_map[c] for c in color_identity if c in basic_land_map]
+        if not commander_basics:
+            commander_basics = ['Wastes']
+
+        num_colors = len(commander_basics)
+        basics_per_color = num_basics_to_add // num_colors if num_colors > 0 else 0
+        remainder = num_basics_to_add % num_colors if num_colors > 0 else num_basics_to_add
+
+        for i, land_name in enumerate(commander_basics):
+            count = basics_per_color + (1 if i < remainder else 0)
+            decklist.extend([land_name] * count)
+            
+        # If no colors and needed Wastes
+        if not commander_basics and remainder > 0:
+             decklist.extend(['Wastes'] * remainder)
+
+    # --- Final Check & Fill (rarely needed) ---
+    if len(decklist) < 100:
+        remaining_slots = 100 - len(decklist)
+        # Add more popular non-lands as filler
+        fillers = candidates_df[~candidates_df['name'].isin(used_cards)].head(remaining_slots)
+        decklist.extend(fillers['name'].tolist())
+
+    return sorted(decklist[:100]), constraints # Ensure exactly 100 cards
 
 def generate_average_deck(df, commander_slug, color_identity):
     if df.empty:
@@ -640,6 +831,11 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
 def main():
     st.title("MTG Deckbuilding Analysis Tool")
 
+    DEFAULT_FUNCTIONAL_CATEGORIES = [
+    "Ramp", "Card Advantage", "Removal", "Sweeper", "Tutor",
+    "Protection", "Recursion", "Counterspell"
+]
+
     # --- Initialize Google Sheets Connection ---
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -650,19 +846,28 @@ def main():
 
     df_raw = None
 
-    # --- DATA SOURCE SELECTION ---
+# --- DATA SOURCE SELECTION ---
     st.sidebar.header("Deck Data Source")
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
 
     commander_slug_for_tools = "ojer-axonil-deepest-might"
+    new_data_loaded = False # Flag to track if we need to clear constraints
 
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
         if decklist_file:
-            commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
-            st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
-            df_raw = pd.read_csv(decklist_file)
-            st.session_state.scraped_df = df_raw
+            # Check if this is a *new* file upload compared to what's in state
+            if 'last_uploaded_filename' not in st.session_state or st.session_state.last_uploaded_filename != decklist_file.name:
+                commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
+                st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
+                df_raw = pd.read_csv(decklist_file)
+                st.session_state.scraped_df = df_raw
+                st.session_state.last_uploaded_filename = decklist_file.name # Store filename
+                new_data_loaded = True
+                st.rerun() # Rerun immediately after loading new file
+            else:
+                 # File already loaded, use existing data
+                 df_raw = st.session_state.scraped_df
 
     elif data_source_option == "Scrape New Data":
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
@@ -677,46 +882,71 @@ def main():
         deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
 
         if st.sidebar.button("🚀 Start Scraping"):
-            with st.spinner("Scraping in progress... this may take several minutes."):
-                df_scraped, colors = run_scraper(
-                    commander_slug, deck_limit,
-                    bracket_slug=selected_bracket_slug,
-                    bracket_name=selected_bracket_name
-                )
-                st.session_state.scraped_df = df_scraped
-                st.session_state.commander_colors = colors
-                st.rerun()
+            # Check if slug or bracket has changed before starting expensive scrape
+             if ('last_scraped_slug' not in st.session_state or st.session_state.last_scraped_slug != commander_slug or
+                 'last_scraped_bracket' not in st.session_state or st.session_state.last_scraped_bracket != selected_bracket_slug):
+                with st.spinner("Scraping in progress... this may take several minutes."):
+                    df_scraped, colors = run_scraper(
+                        commander_slug, deck_limit,
+                        bracket_slug=selected_bracket_slug,
+                        bracket_name=selected_bracket_name
+                    )
+                    st.session_state.scraped_df = df_scraped
+                    st.session_state.commander_colors = colors
+                    st.session_state.last_scraped_slug = commander_slug # Store what was scraped
+                    st.session_state.last_scraped_bracket = selected_bracket_slug
+                    new_data_loaded = True
+                    st.rerun() # Rerun immediately after scraping
+             else:
+                  st.sidebar.info("Scrape parameters haven't changed. Using existing data.")
+                  df_raw = st.session_state.scraped_df # Use existing data if params match
 
+
+    # Load data from session state if it exists (e.g., after rerun)
     if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
         df_raw = st.session_state.scraped_df
-        st.sidebar.success("Scraped data is loaded.")
-        if data_source_option == "Scrape New Data":
-            commander_slug_for_tools = commander_slug
+        if not new_data_loaded: # Only show success if we didn't just load it
+             st.sidebar.success("Scraped data is loaded.")
+        if data_source_option == "Scrape New Data" and 'last_scraped_slug' in st.session_state:
+            commander_slug_for_tools = st.session_state.last_scraped_slug
+        elif data_source_option == "Upload CSV" and 'last_uploaded_filename' in st.session_state:
+             try:
+                  commander_slug_for_tools = st.session_state.last_uploaded_filename.split('_combined_decklists.csv')[0]
+             except: pass # Ignore if filename format is wrong
+
+
+    # --- Clear constraints if new data was loaded ---
+    if new_data_loaded:
+        st.sidebar.info("New data loaded. Clearing deck template constraints.")
+        if 'func_constraints' in st.session_state:
+            del st.session_state['func_constraints']
+        if 'type_constraints' in st.session_state:
+            del st.session_state['type_constraints']
+        # Optionally clear imported tags as well, or handle in reset only
+        # if 'imported_tags' in st.session_state:
+        #     del st.session_state['imported_tags']
+
 
     # --- RESET BUTTON ---
     st.sidebar.divider()
     if st.sidebar.button("🧹 Clear All Data & Reset"):
         keys_to_clear = [
             'scraped_df', 'commander_colors', 'master_categories', 'junk_tags',
-            'imported_tags', 'func_constraints', 'type_constraints'
-            # Add any other custom session state keys if you have them
+            'imported_tags', # Added imported_tags
+            'func_constraints', 'type_constraints',
+            'last_uploaded_filename', 'last_scraped_slug', 'last_scraped_bracket' # Clear tracking keys
         ]
-        st.sidebar.write("Clearing session state keys...") # User feedback
+        st.sidebar.write("Clearing session state keys...")
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
-        
-        # --- ADD THIS LINE TO CLEAR THE CACHE ---
-        st.sidebar.write("Clearing application data cache...") # User feedback
+
+        st.sidebar.write("Clearing application data cache...")
         st.cache_data.clear()
-        # --- END ADDITION ---
-        
-        # Optional: Clear resource cache if needed (e.g., if playwright state gets stuck)
-        # st.cache_resource.clear() 
-        # st.sidebar.write("Clearing application resource cache...")
+        # st.cache_resource.clear() # Usually not needed unless playwright gets stuck
 
         st.success("All session data and caches cleared!")
-        time.sleep(1) # Allow user to see the success message
+        time.sleep(1)
         st.rerun()
 
     # ===============================================================
@@ -866,6 +1096,34 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
+        # --- NEW: Initialize Active Functional Categories ---
+        if FUNCTIONAL_ANALYSIS_ENABLED:
+            if 'active_func_categories' not in st.session_state:
+                # Get all unique categories from the data
+                if 'category' in df.columns:
+                    all_individual_categories = df['category'].astype(str).str.split('|').explode()
+                    all_func_categories = sorted([
+                        cat for cat in all_individual_categories.unique()
+                        if pd.notna(cat) and cat not in ['Uncategorized', '']
+                    ])
+                    # Filter based on default list
+                    st.session_state.active_func_categories = [
+                        cat for cat in all_func_categories if cat in DEFAULT_FUNCTIONAL_CATEGORIES
+                    ]
+                else:
+                    st.session_state.active_func_categories = []
+                    all_func_categories = [] # Define for later use
+            else:
+                 # If already initialized, ensure we still know all possible categories
+                 if 'category' in df.columns:
+                     all_individual_categories = df['category'].astype(str).str.split('|').explode()
+                     all_func_categories = sorted([
+                         cat for cat in all_individual_categories.unique()
+                         if pd.notna(cat) and cat not in ['Uncategorized', '']
+                     ])
+                 else:
+                      all_func_categories = []
+
         st.header("Dashboard & Analysis")
         col1, col2 = st.columns(2)
         with col1:
@@ -910,6 +1168,7 @@ def main():
                  st.write("CMC data missing or invalid for mana curve.")
 
 
+        
         if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty and 'category' in spells_df.columns:
             with st.expander("Functional Analysis"):
                 func_df = spells_df.copy()
@@ -936,6 +1195,59 @@ def main():
                 else:
                     st.info("No categorized card functions found to display in the analysis.")
 
+# --- NEW: Average Deck Statistics Section ---
+        with st.expander("📊 Average Deck Statistics", expanded=False):
+            avg_stats = calculate_average_stats(df, NUM_DECKS)
+
+            if avg_stats:
+                st.subheader("Overall Averages")
+                col_s1, col_s2, col_s3 = st.columns(3)
+                col_s1.metric("Avg. CMC (Non-Lands)", f"{avg_stats.get('avg_cmc_overall', 0):.2f}")
+                col_s2.metric("Avg. Total Lands", f"{avg_stats.get('avg_total_lands', 0):.1f}")
+                col_s3.metric("Avg. Deck Price ($)", f"${avg_stats.get('avg_deck_price', 0):.2f}" if 'avg_deck_price' in avg_stats else "N/A")
+
+                st.subheader("Average Card Type Distribution")
+                type_data = pd.DataFrame({
+                    'Type': list(avg_stats.get('avg_type_counts', {}).keys()),
+                    'Average Count': list(avg_stats.get('avg_type_counts', {}).values())
+                }).sort_values('Average Count', ascending=False)
+
+                if not type_data.empty:
+                     fig_type_dist = px.bar(type_data, x='Type', y='Average Count', title='Average Card Counts per Type')
+                     st.plotly_chart(fig_type_dist, use_container_width=True)
+
+                     # Display percentages
+                     # st.write("Average Type Percentages:")
+                     # perc_df = pd.DataFrame({
+                     #      'Percentage': avg_stats.get('avg_type_percentages', {})
+                     # }).sort_values('Percentage', ascending=False)
+                     # st.dataframe(perc_df.style.format("{:.1f}%"))
+
+                st.subheader("Land Breakdown")
+                st.write(f"- Average Non-Basic Lands: {avg_stats.get('avg_non_basic_lands', 0):.1f}")
+                st.write(f"- Average Basic Lands: {avg_stats.get('avg_basic_lands', 0):.1f}")
+
+                st.subheader("Mana Curve (Average Non-Land CMC Distribution)")
+                cmc_dist_data = avg_stats.get('cmc_distribution', {})
+                if cmc_dist_data:
+                     cmc_df = pd.DataFrame(list(cmc_dist_data.items()), columns=['CMC', 'Count']).sort_values('CMC')
+                     # Normalize count to average per deck
+                     cmc_df['Average Count per Deck'] = cmc_df['Count'] / NUM_DECKS
+                     fig_cmc_dist = px.bar(cmc_df, x='CMC', y='Average Count per Deck', title='Average Non-Land Mana Curve')
+                     st.plotly_chart(fig_cmc_dist, use_container_width=True)
+
+
+                if 'avg_deck_price' in avg_stats:
+                     st.subheader("Deck Price Range")
+                     st.write(f"- Minimum Price: ${avg_stats.get('min_deck_price', 0):.2f}")
+                     st.write(f"- Median Price: ${avg_stats.get('median_deck_price', 0):.2f}")
+                     st.write(f"- Average Price: ${avg_stats.get('avg_deck_price', 0):.2f}")
+                     st.write(f"- Maximum Price: ${avg_stats.get('max_deck_price', 0):.2f}")
+
+            else:
+                st.info("Could not calculate average stats. Ensure data is loaded.")
+        # --- END Average Deck Statistics ---
+        
         with st.expander("Personal Deckbuilding Tools", expanded=True):
             st.subheader("Analyze Your Decklist")
             decklist_input = st.text_area("Paste your decklist here:", height=200, key="deck_analyzer_input")
@@ -1002,24 +1314,58 @@ def main():
                      st.warning("Type data missing, cannot configure type constraints.")
 
 
-                with st.expander("Step 1: Configure Functional Constraints", expanded=True):
-                    available_funcs = [f for f in func_categories_list if f not in st.session_state.func_constraints]
-                    if available_funcs:
-                        col1, col2 = st.columns([3, 1])
-                        new_func = col1.selectbox("Add functional category:", options=available_funcs, key="new_func_select", index=None, placeholder="Choose a function...")
-                        if col2.button("Add Function", key="add_func_btn") and new_func:
-                            st.session_state.func_constraints[new_func] = (8, 12) if new_func in ['Ramp', 'Card Draw'] else (2, 8)
-                            st.rerun()
-                    elif func_categories_list: # Only show message if categories exist but are all used
-                         st.info("All available functional categories have been added.")
+with st.expander("Step 1: Configure Functional Constraints", expanded=True):
+                    # --- MODIFICATION: Use active list and allow adding ---
+                    active_categories = st.session_state.get('active_func_categories', [])
+                    
+                    # Section to add new categories
+                    st.write("**Add Functional Category to Track:**")
+                    # Options are all categories found MINUS those already active
+                    add_options = sorted([
+                        cat for cat in all_func_categories # Use the full list here
+                        if cat not in active_categories
+                    ])
+                    col1_add, col2_add = st.columns([3, 1])
+                    new_func_to_add = col1_add.selectbox(
+                        "Select category to add:",
+                        options=add_options,
+                        key="add_func_select",
+                        index=None,
+                        placeholder="Choose function..."
+                    )
+                    if col2_add.button("Add Category", key="add_new_func_btn") and new_func_to_add:
+                        st.session_state.active_func_categories.append(new_func_to_add)
+                        st.rerun()
 
+                    st.divider() # Separator
 
-                    for func in list(st.session_state.func_constraints.keys()):
-                        col1, col2 = st.columns([4, 1])
+                    # Section to manage constraints for ACTIVE categories
+                    st.write("**Configure Constraints for Active Categories:**")
+                    if not active_categories:
+                         st.info("No active functional categories. Add some above.")
+
+                    for func in sorted(list(active_categories)): # Iterate over active list
+                        col1, col2, col3 = st.columns([3, 2, 1])
                         col1.write(f"- **{func}**")
-                        if col2.button("Remove", key=f"del_func_{func}"):
-                            del st.session_state.func_constraints[func]
+                        
+                        # Initialize constraint if not present
+                        if func not in st.session_state.func_constraints:
+                             st.session_state.func_constraints[func] = (8, 12) if func in ['Ramp', 'Card Advantage'] else (2, 8) # Default
+
+                        # Use current value for the slider
+                        current_range = st.session_state.func_constraints[func]
+                        
+                        # Add range display (optional but helpful)
+                        # col2.write(f"Range: {current_range[0]} - {current_range[1]}")
+                        
+                        # Button to remove category from the ACTIVE list
+                        if col3.button("Remove", key=f"del_active_func_{func}"):
+                            st.session_state.active_func_categories.remove(func)
+                            # Also remove its constraint setting
+                            if func in st.session_state.func_constraints:
+                                del st.session_state.func_constraints[func]
                             st.rerun()
+                    # --- END MODIFICATION ---
 
                 with st.expander("Step 2: Configure Card Type Constraints"):
                     available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
@@ -1042,37 +1388,71 @@ def main():
 
                 with st.form(key='template_form'):
                     st.write("---")
-                    st.write("**Step 3: Set Ranges and Generate**")
-                    template_must_haves = st.text_area("Must-Include Cards (one per line):", key="template_must_haves")
+                    st.write("**Step 3: Define Must-Haves, Exclusions, Ranges, and Generate**")
+                    
+                    col_must, col_exclude = st.columns(2)
+                    with col_must:
+                        template_must_haves = st.text_area("Must-Include Cards (one per line):", height=150, key="template_must_haves")
+                    with col_exclude:
+                        template_must_excludes = st.text_area("Must-Exclude Cards (one per line):", height=150, key="template_must_excludes")
+
 
                     if not st.session_state.func_constraints and not st.session_state.type_constraints:
                         st.info("Add functional or card type constraints above to set their ranges here.")
-
+                    
+                    st.write("**Set Constraint Ranges:**")
+                    # Use columns for slider + number input layout
                     for func, value in st.session_state.func_constraints.items():
-                        # Ensure value is a tuple/list of two numbers
-                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15)
-                        st.session_state.func_constraints[func] = st.slider(f"Range for '{func}'", 0, 40, current_value, key=f"slider_func_{func}")
+                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (2, 8) # Default range
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1:
+                            new_range = st.slider(f"'{func}' count", 0, 40, current_value, key=f"slider_func_{func}")
+                        with c2:
+                            min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
+                        with c3:
+                            max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
+                        # Update session state if number inputs change the value
+                        if (min_val, max_val) != new_range:
+                             st.session_state.func_constraints[func] = (min_val, max_val)
+                             st.rerun() # Rerun needed to update the slider
+                        else:
+                             st.session_state.func_constraints[func] = new_range
+
 
                     for ctype, value in st.session_state.type_constraints.items():
-                         # Ensure value is a tuple/list of two numbers
-                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15)
-                        st.session_state.type_constraints[ctype] = st.slider(f"Range for '{ctype}'", 0, 60, current_value, key=f"slider_type_{ctype}")
+                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15) # Default range
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1:
+                             new_range = st.slider(f"'{ctype}' count", 0, 60, current_value, key=f"slider_type_{ctype}")
+                        with c2:
+                             min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
+                        with c3:
+                             max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
+                        # Update session state if number inputs change the value
+                        if (min_val, max_val) != new_range:
+                             st.session_state.type_constraints[ctype] = (min_val, max_val)
+                             st.rerun() # Rerun needed to update the slider
+                        else:
+                             st.session_state.type_constraints[ctype] = new_range
 
 
                     submitted = st.form_submit_button("📋 Generate Deck With Constraints")
 
                     if submitted:
-                        # Ensure POP_ALL exists and has necessary columns
+                        # --- (Rest of the submission logic needs modification) ---
+                        # (See section 3 below for the updated submission logic)
+                        # --- Start Placeholder for Section 3 ---
                         if POP_ALL.empty or 'name' not in POP_ALL.columns or 'count' not in POP_ALL.columns:
                              st.error("Popularity data is missing or invalid. Cannot generate deck template.")
                         else:
                             constraints = {'functions': {}, 'types': {}}
+                            # ... (constraint dictionary creation as before) ...
                             for func, val_tuple in st.session_state.func_constraints.items():
                                 if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2:
                                     constraints['functions'][func] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
                                 else:
-                                     st.warning(f"Invalid range for function '{func}'. Using default [5, 15].")
-                                     constraints['functions'][func] = {'target': [5, 15], 'current': 0}
+                                     st.warning(f"Invalid range for function '{func}'. Using default [2, 8].")
+                                     constraints['functions'][func] = {'target': [2, 8], 'current': 0}
 
 
                             for ctype, val_tuple in st.session_state.type_constraints.items():
@@ -1082,39 +1462,48 @@ def main():
                                      st.warning(f"Invalid range for type '{ctype}'. Using default [5, 15].")
                                      constraints['types'][ctype] = {'target': [5, 15], 'current': 0}
 
+                            # --- Get Must Haves/Excludes ---
+                            must_haves = parse_decklist(template_must_haves)
+                            must_excludes = parse_decklist(template_must_excludes)
+                            commander_colors = st.session_state.get('commander_colors', [])
 
                             with st.spinner("Generating decklists..."):
-                                must_haves = parse_decklist(template_must_haves)
-                                # Ensure required columns exist before processing
-                                if 'name' in df.columns and 'category' in df.columns and 'cmc' in df.columns:
-                                    base_candidates = df.drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name', how='left')
-                                    # Handle potential merge issues where count might be NaN
-                                    base_candidates['count'] = base_candidates['count'].fillna(0)
-                                    base_candidates['category_list'] = base_candidates['category'].astype(str).str.split('|')
+                                 # ... (candidate df creation as before) ...
+                                 if 'name' in df.columns and 'category' in df.columns and 'cmc' in df.columns:
+                                     # Filter out excluded cards from the start
+                                     base_candidates = df[~df['name'].isin(must_excludes)].drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name', how='left')
+                                     base_candidates['count'] = base_candidates['count'].fillna(0)
+                                     base_candidates['category_list'] = base_candidates['category'].astype(str).str.split('|')
 
-                                    candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
-                                    candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
+                                     candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
+                                     candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
 
-                                    median_cmc = candidates_eff['cmc'].median() if not candidates_eff['cmc'].isnull().all() else 3 # Default median if all are NaN
-                                    # Ensure cmc is numeric for calculation
-                                    candidates_eff['cmc_filled'] = pd.to_numeric(candidates_eff['cmc'], errors='coerce').fillna(median_cmc)
+                                     median_cmc = candidates_eff['cmc'].median() if not candidates_eff['cmc'].isnull().all() else 3
+                                     candidates_eff['cmc_filled'] = pd.to_numeric(candidates_eff['cmc'], errors='coerce').fillna(median_cmc)
+                                     candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc_filled'] + 1).clip(lower=1)
+                                     candidates_eff = candidates_eff.sort_values('efficiency_score', ascending=False)
 
-                                    # Avoid division by zero or negative scores
-                                    candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc_filled'] + 1).clip(lower=1)
-                                    candidates_eff = candidates_eff.sort_values('efficiency_score', ascending=False)
+                                     # --- Call updated _fill_deck_slots ---
+                                     pop_deck, _ = _fill_deck_slots(
+                                          candidates_pop, deepcopy(constraints), initial_decklist=must_haves,
+                                          lands_df=lands_df[~lands_df['name'].isin(must_excludes)], # Pass filtered lands
+                                          color_identity=commander_colors
+                                     )
+                                     eff_deck, _ = _fill_deck_slots(
+                                          candidates_eff, deepcopy(constraints), initial_decklist=must_haves,
+                                          lands_df=lands_df[~lands_df['name'].isin(must_excludes)], # Pass filtered lands
+                                          color_identity=commander_colors
+                                     )
+                                     # --- End call update ---
 
-                                    pop_deck, _ = _fill_deck_slots(candidates_pop, deepcopy(constraints), initial_decklist=must_haves)
-                                    eff_deck, _ = _fill_deck_slots(candidates_eff, deepcopy(constraints), initial_decklist=must_haves)
+                                     pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
+                                     eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
 
-                                    pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
-                                    eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
-
-                                    t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
-                                    with t1: st.dataframe(pop_df)
-                                    with t2: st.dataframe(eff_df)
-                                else:
+                                     t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
+                                     with t1: st.dataframe(pop_df)
+                                     with t2: st.dataframe(eff_df)
+                                 else:
                                      st.error("Required columns ('name', 'category', 'cmc') not found in data. Cannot generate template.")
-
 
             else:
                 st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
