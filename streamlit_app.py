@@ -384,7 +384,7 @@ def clean_and_prepare_data(_df, _categories_df=None):
     
     return dfc, functional_analysis_enabled, num_decks, pop_all
 
-@st.cache_data
+#@st.cache_data
 def calculate_average_stats(_df, num_decks):
     """Calculates average statistics across all decks in the DataFrame,
        inferring basic land counts."""
