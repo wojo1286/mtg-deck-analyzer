@@ -862,13 +862,14 @@ def scrape_scryfall_tagger(card_names: list, junk_tags_from_sheet: list):
 # ===================================================================
 # 4. STREAMLIT UI & APP LOGIC
 # ===================================================================
+
 def main():
     st.title("MTG Deckbuilding Analysis Tool")
 
     DEFAULT_FUNCTIONAL_CATEGORIES = [
-    "Ramp", "Card Advantage", "Removal", "Sweeper", "Tutor",
-    "Protection", "Recursion", "Counterspell"
-]
+        "Ramp", "Card Advantage", "Removal", "Sweeper", "Tutor",
+        "Protection", "Recursion", "Counterspell"
+    ]
 
     # --- Initialize Google Sheets Connection ---
     try:
@@ -880,7 +881,7 @@ def main():
 
     df_raw = None
 
-# --- DATA SOURCE SELECTION ---
+    # --- DATA SOURCE SELECTION ---
     st.sidebar.header("Deck Data Source")
     data_source_option = st.sidebar.radio("Choose a data source:", ("Upload CSV", "Scrape New Data"), key="data_source")
 
@@ -890,33 +891,32 @@ def main():
     if data_source_option == "Upload CSV":
         decklist_file = st.sidebar.file_uploader("Upload Combined Decklists CSV", type=["csv"])
         if decklist_file:
-            # Check if this is a *new* file upload compared to what's in state
             if 'last_uploaded_filename' not in st.session_state or st.session_state.last_uploaded_filename != decklist_file.name:
-                commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
-                st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
-                df_raw = pd.read_csv(decklist_file)
-                st.session_state.scraped_df = df_raw
-                st.session_state.last_uploaded_filename = decklist_file.name # Store filename
-                new_data_loaded = True
-                st.rerun() # Rerun immediately after loading new file
+                try: # Add try-except for robustness
+                    commander_slug_for_tools = decklist_file.name.split('_combined_decklists.csv')[0]
+                    st.session_state.commander_colors = get_commander_color_identity(commander_slug_for_tools)
+                    df_raw = pd.read_csv(decklist_file)
+                    st.session_state.scraped_df = df_raw
+                    st.session_state.last_uploaded_filename = decklist_file.name
+                    new_data_loaded = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error processing uploaded CSV: {e}")
+                    df_raw = None # Ensure df_raw is None on error
             else:
-                 # File already loaded, use existing data
                  df_raw = st.session_state.scraped_df
 
     elif data_source_option == "Scrape New Data":
         commander_slug = st.sidebar.text_input("Enter Commander Slug", "ojer-axonil-deepest-might")
-
         bracket_options = {
             "All Decks": "", "Budget": "budget", "Upgraded": "upgraded",
             "Optimized": "optimized", "cEDH": "cedh"
         }
         selected_bracket_name = st.sidebar.selectbox("Select Bracket Level:", options=list(bracket_options.keys()))
         selected_bracket_slug = bracket_options[selected_bracket_name]
-
         deck_limit = st.sidebar.slider("Number of decks to scrape", 10, 200, 50)
 
         if st.sidebar.button("🚀 Start Scraping"):
-            # Check if slug or bracket has changed before starting expensive scrape
              if ('last_scraped_slug' not in st.session_state or st.session_state.last_scraped_slug != commander_slug or
                  'last_scraped_bracket' not in st.session_state or st.session_state.last_scraped_bracket != selected_bracket_slug):
                 with st.spinner("Scraping in progress... this may take several minutes."):
@@ -927,26 +927,28 @@ def main():
                     )
                     st.session_state.scraped_df = df_scraped
                     st.session_state.commander_colors = colors
-                    st.session_state.last_scraped_slug = commander_slug # Store what was scraped
+                    st.session_state.last_scraped_slug = commander_slug
                     st.session_state.last_scraped_bracket = selected_bracket_slug
                     new_data_loaded = True
-                    st.rerun() # Rerun immediately after scraping
+                    st.rerun()
              else:
                   st.sidebar.info("Scrape parameters haven't changed. Using existing data.")
-                  df_raw = st.session_state.scraped_df # Use existing data if params match
+                  if 'scraped_df' in st.session_state: # Load if scrape wasn't run but data exists
+                       df_raw = st.session_state.scraped_df
 
 
-    # Load data from session state if it exists (e.g., after rerun)
-    if 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
+    # Load data from session state if it exists (e.g., after rerun or if scrape wasn't needed)
+    if df_raw is None and 'scraped_df' in st.session_state and st.session_state.scraped_df is not None:
         df_raw = st.session_state.scraped_df
-        if not new_data_loaded: # Only show success if we didn't just load it
+        if not new_data_loaded:
              st.sidebar.success("Scraped data is loaded.")
-        if data_source_option == "Scrape New Data" and 'last_scraped_slug' in st.session_state:
-            commander_slug_for_tools = st.session_state.last_scraped_slug
-        elif data_source_option == "Upload CSV" and 'last_uploaded_filename' in st.session_state:
+        # Determine commander slug based on how data was loaded
+        if 'last_scraped_slug' in st.session_state:
+             commander_slug_for_tools = st.session_state.last_scraped_slug
+        elif 'last_uploaded_filename' in st.session_state:
              try:
                   commander_slug_for_tools = st.session_state.last_uploaded_filename.split('_combined_decklists.csv')[0]
-             except: pass # Ignore if filename format is wrong
+             except: pass
 
 
     # --- Clear constraints if new data was loaded ---
@@ -956,19 +958,16 @@ def main():
             del st.session_state['func_constraints']
         if 'type_constraints' in st.session_state:
             del st.session_state['type_constraints']
-        # Optionally clear imported tags as well, or handle in reset only
-        # if 'imported_tags' in st.session_state:
-        #     del st.session_state['imported_tags']
-
+        if 'active_func_categories' in st.session_state: # Also clear the active list
+             del st.session_state['active_func_categories']
 
     # --- RESET BUTTON ---
     st.sidebar.divider()
     if st.sidebar.button("🧹 Clear All Data & Reset"):
         keys_to_clear = [
             'scraped_df', 'commander_colors', 'master_categories', 'junk_tags',
-            'imported_tags', # Added imported_tags
-            'func_constraints', 'type_constraints',
-            'last_uploaded_filename', 'last_scraped_slug', 'last_scraped_bracket' # Clear tracking keys
+            'imported_tags', 'func_constraints', 'type_constraints', 'active_func_categories', # Added active_func_categories
+            'last_uploaded_filename', 'last_scraped_slug', 'last_scraped_bracket'
         ]
         st.sidebar.write("Clearing session state keys...")
         for key in keys_to_clear:
@@ -977,7 +976,7 @@ def main():
 
         st.sidebar.write("Clearing application data cache...")
         st.cache_data.clear()
-        # st.cache_resource.clear() # Usually not needed unless playwright gets stuck
+        # st.cache_resource.clear()
 
         st.success("All session data and caches cleared!")
         time.sleep(1)
@@ -1002,7 +1001,7 @@ def main():
                 st.session_state.master_categories = conn.read(worksheet="Categories")
             except Exception as e:
                 st.sidebar.error(f"Failed to load 'Categories' sheet: {e}")
-                st.session_state.master_categories = pd.DataFrame(columns=['name', 'category']) # Ensure it exists as empty
+                st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
 
     if 'junk_tags' not in st.session_state and st.session_state.gsheets_connected:
         with st.spinner("Loading junk tag list..."):
@@ -1015,89 +1014,61 @@ def main():
                 st.sidebar.info("No 'JunkTags' worksheet found or it's empty. Using defaults.")
                 st.session_state.junk_tags = []
 
-    # --- START OF MODIFIED SECTION FOR SCRAPING MISSING CATEGORIES ---
     if st.session_state.gsheets_connected:
         if st.sidebar.button("Scrape Missing Tagger Categories 🔎"):
-            # Ensure master_categories exists and is a DataFrame, even if loading failed
             if 'master_categories' not in st.session_state:
                 st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
 
             if not st.session_state.master_categories.empty:
-                
-                # --- Filter for cards without categories ---
                 gsheet_df = st.session_state.master_categories.copy()
-                # Ensure 'category' column exists and handle potential NaN/None
-                if 'category' not in gsheet_df.columns:
-                    gsheet_df['category'] = ''
+                if 'category' not in gsheet_df.columns: gsheet_df['category'] = ''
                 gsheet_df['category'] = gsheet_df['category'].fillna('')
-                
-                # Select names where category is an empty string
                 cards_to_scrape_df = gsheet_df[gsheet_df['category'] == '']
-                
+
                 if not cards_to_scrape_df.empty and 'name' in cards_to_scrape_df.columns:
                     cards_to_scrape = cards_to_scrape_df['name'].dropna().unique().tolist()
                     st.sidebar.info(f"Found {len(cards_to_scrape)} cards in GSheet without categories.")
                 else:
                     st.sidebar.info("All cards in GSheet already have categories or 'name' column missing. No scraping needed.")
                     cards_to_scrape = []
-                # --- End Filter ---
 
                 if cards_to_scrape:
                     junk_tags_list = st.session_state.get('junk_tags', [])
                     with st.spinner(f"Scraping Scryfall Tagger for {len(cards_to_scrape)} cards..."):
                         tagger_df = scrape_scryfall_tagger(cards_to_scrape, junk_tags_list)
-                    
+
                     if not tagger_df.empty:
                         st.toast(f"Scraped tags for {len(tagger_df)} cards!", icon="✅")
-                        
-                        # --- Merge and save back to GSheet ---
                         st.sidebar.write("Merging scraped tags with GSheet data...")
-                        
-                        # Use the original DataFrame from session state for merging
                         master_df_copy = st.session_state.master_categories.copy()
-                        if 'category' not in master_df_copy.columns: # Ensure category column exists
-                           master_df_copy['category'] = ''
+                        if 'category' not in master_df_copy.columns: master_df_copy['category'] = ''
                         master_df_copy['category'] = master_df_copy['category'].fillna('')
-
-
-                        # Set index on the copy and the new tags for efficient update
                         master_df_copy.set_index('name', inplace=True)
                         tagger_df.set_index('name', inplace=True)
-                        
-                        # Update the categories in the copied DataFrame
                         master_df_copy.update(tagger_df)
-                        
-                        # Reset index and sort
                         updated_master = master_df_copy.reset_index().sort_values('name')
-                        # Ensure 'name' and 'category' are the first two columns if others exist
                         cols = ['name', 'category'] + [col for col in updated_master.columns if col not in ['name', 'category']]
                         updated_master = updated_master[cols]
 
                         st.sidebar.write("Saving updated categories to Google Sheet...")
                         try:
                             conn.update(worksheet="Categories", data=updated_master)
-                            st.session_state.master_categories = updated_master # Update session state
+                            st.session_state.master_categories = updated_master
                             st.sidebar.success("Google Sheet updated successfully!")
-                            time.sleep(1) # Give time for user to see success message
-                            st.rerun() # Rerun to reflect changes immediately
+                            time.sleep(1)
+                            st.rerun()
                         except Exception as e:
                             st.sidebar.error(f"Failed to update Google Sheet: {e}")
-                        # --- End Merge/Save ---
-                        
                     else:
                         st.sidebar.warning("Scraping finished, but no new tags were found.")
             else:
                 st.sidebar.warning("Your 'Categories' GSheet is empty or not loaded. Cannot determine which cards to scrape.")
-    # --- END OF MODIFIED SECTION ---
 
     # --- Robust category loading and merging ---
     categories_df_master = pd.DataFrame(columns=['name', 'category'])
     imported_df = st.session_state.get('imported_tags', pd.DataFrame())
-    
-    # Use the potentially updated master_categories from session state
     gsheets_df = st.session_state.get('master_categories', pd.DataFrame())
 
-    # Gracefully handle DataFrames that are None or lack the 'name' column
     if gsheets_df is None or not isinstance(gsheets_df, pd.DataFrame) or 'name' not in gsheets_df.columns:
         if gsheets_df is not None and not gsheets_df.empty:
             st.warning("Your 'Categories' Google Sheet is missing the 'name' column or is invalid and will be ignored.")
@@ -1107,21 +1078,16 @@ def main():
         imported_df = pd.DataFrame(columns=['name', 'category'])
 
     if not gsheets_df.empty or not imported_df.empty:
-        # Prioritize GSheet data, fill with imported only if GSheet category is missing
         merged_df = pd.merge(gsheets_df, imported_df, on='name', how='outer', suffixes=('_gsheet', '_imported'))
         merged_df['category_gsheet'] = merged_df['category_gsheet'].fillna('')
         merged_df['category_imported'] = merged_df['category_imported'].fillna('')
-        
-        # Use gsheet category if it exists, otherwise use imported category
         merged_df['category'] = np.where(
             merged_df['category_gsheet'] != '',
             merged_df['category_gsheet'],
             merged_df['category_imported']
         )
-        # Select necessary columns and drop duplicates just in case
         categories_df_master = merged_df[['name', 'category']].drop_duplicates(subset=['name'], keep='first').sort_values('name').reset_index(drop=True)
         st.sidebar.info("Combined GSheet & Imported tags.")
-    # --- END category loading ---
 
     st.sidebar.divider()
 
@@ -1130,25 +1096,23 @@ def main():
         df, FUNCTIONAL_ANALYSIS_ENABLED, NUM_DECKS, POP_ALL = clean_and_prepare_data(df_raw, categories_df_master)
         st.success(f"Data loaded with {NUM_DECKS} unique decks. Ready for analysis.")
 
-        # --- NEW: Initialize Active Functional Categories ---
+        # --- Initialize Active Functional Categories ---
+        all_func_categories = [] # Define scope outside if block
         if FUNCTIONAL_ANALYSIS_ENABLED:
             if 'active_func_categories' not in st.session_state:
-                # Get all unique categories from the data
                 if 'category' in df.columns:
                     all_individual_categories = df['category'].astype(str).str.split('|').explode()
                     all_func_categories = sorted([
                         cat for cat in all_individual_categories.unique()
                         if pd.notna(cat) and cat not in ['Uncategorized', '']
                     ])
-                    # Filter based on default list
                     st.session_state.active_func_categories = [
                         cat for cat in all_func_categories if cat in DEFAULT_FUNCTIONAL_CATEGORIES
                     ]
                 else:
                     st.session_state.active_func_categories = []
-                    all_func_categories = [] # Define for later use
+                    all_func_categories = []
             else:
-                 # If already initialized, ensure we still know all possible categories
                  if 'category' in df.columns:
                      all_individual_categories = df['category'].astype(str).str.split('|').explode()
                      all_func_categories = sorted([
@@ -1165,7 +1129,6 @@ def main():
             main_top_n = st.slider('Top N Staples:', 5, 100, 25, 5)
             exclude_top = st.checkbox('Exclude Top N Staples', False)
         with col2:
-            # Ensure unique_types list doesn't contain None or NaN before sorting
             unique_types_raw = df['type'].unique()
             unique_types = sorted([t for t in unique_types_raw if pd.notna(t) and t != 'Unknown'])
             exclude_types = st.multiselect('Exclude Types:', options=unique_types, default=[])
@@ -1191,7 +1154,6 @@ def main():
                 fig_lands = px.bar(pop_lands.head(25), y='name', x='count', orientation='h', title='Top 25 Lands')
                 fig_lands.update_layout(yaxis=dict(autorange='reversed'), height=600); st.plotly_chart(fig_lands, use_container_width=True)
         with c3:
-            # Ensure cmc column exists and is numeric before grouping
             if 'cmc' in spells_df.columns and pd.api.types.is_numeric_dtype(spells_df['cmc']):
                  curve = spells_df.groupby('cmc').size().reset_index(name='count')
                  if not curve.empty:
@@ -1201,34 +1163,22 @@ def main():
             else:
                  st.write("CMC data missing or invalid for mana curve.")
 
-# --- Average Deck Statistics Section ---
-        with st.expander("📊 Average Deck Statistics", expanded=True): # Expanded by default now
+        # --- Average Deck Statistics Section ---
+        with st.expander("📊 Average Deck Statistics", expanded=True):
 
-            # --- ADDED: Functional Category Management UI ---
             if FUNCTIONAL_ANALYSIS_ENABLED:
                 st.subheader("Functional Category Tracking")
                 active_categories = st.session_state.get('active_func_categories', [])
-
                 st.write("**Add/Remove Functional Categories to Track:**")
-                # Ensure all_func_categories is defined from the initialization block
+                # Ensure all_func_categories is defined
                 if 'all_func_categories' not in locals(): all_func_categories = []
 
-                add_options = sorted([
-                    cat for cat in all_func_categories
-                    if cat not in active_categories
-                ])
+                add_options = sorted([cat for cat in all_func_categories if cat not in active_categories])
                 col1_add, col2_add = st.columns([3, 1])
-                new_func_to_add = col1_add.selectbox(
-                    "Select category to add:",
-                    options=add_options,
-                    key="add_func_select_stats", # Use a unique key
-                    index=None,
-                    placeholder="Choose function..."
-                )
-                if col2_add.button("Add Category", key="add_new_func_btn_stats"): # Use a unique key
+                new_func_to_add = col1_add.selectbox("Select category to add:", options=add_options, key="add_func_select_stats", index=None, placeholder="Choose function...")
+                if col2_add.button("Add Category", key="add_new_func_btn_stats"):
                     if new_func_to_add:
                         st.session_state.active_func_categories.append(new_func_to_add)
-                        # Initialize constraint if generating templates
                         if 'func_constraints' in st.session_state:
                               st.session_state.func_constraints[new_func_to_add] = (8, 12) if new_func_to_add in ['Ramp', 'Card Advantage'] else (2, 8)
                         st.rerun()
@@ -1237,11 +1187,9 @@ def main():
                 if not active_categories:
                      st.info("No functional categories are currently being tracked. Add some above.")
                 else:
-                    cols_per_row = 4 # Adjust how many remove buttons per row
+                    cols_per_row = 4
                     num_rows = (len(active_categories) + cols_per_row - 1) // cols_per_row
-                    
-                    category_list_sorted = sorted(active_categories) # Sort for consistent display
-
+                    category_list_sorted = sorted(active_categories)
                     for i in range(num_rows):
                         cols = st.columns(cols_per_row)
                         for j in range(cols_per_row):
@@ -1250,16 +1198,13 @@ def main():
                                 func = category_list_sorted[idx]
                                 with cols[j]:
                                     st.markdown(f"- **{func}**")
-                                    if st.button("Remove", key=f"del_active_func_stats_{func}", help=f"Stop tracking {func}"): # Unique key
+                                    if st.button("Remove", key=f"del_active_func_stats_{func}", help=f"Stop tracking {func}"):
                                         st.session_state.active_func_categories.remove(func)
-                                        # Also remove its constraint setting if it exists
                                         if 'func_constraints' in st.session_state and func in st.session_state.func_constraints:
                                             del st.session_state.func_constraints[func]
                                         st.rerun()
-                st.divider() # Separator before stats
-            # --- END ADDED UI ---
+                st.divider()
 
-            # Pass active categories to the calculation function
             active_categories_for_stats = st.session_state.get('active_func_categories', [])
             avg_stats = calculate_average_stats(df, NUM_DECKS, active_categories_for_stats)
 
@@ -1271,29 +1216,18 @@ def main():
                 col_s2.metric("Avg. Total Lands", f"{avg_stats.get('avg_total_lands', 0):.1f}")
                 col_s3.metric("Avg. Deck Price ($)", f"${avg_stats.get('avg_deck_price', 0):.2f}" if 'avg_deck_price' in avg_stats else "N/A")
 
-                # --- ADDED: Functional Category Stats Display ---
                 st.subheader("Average Functional Category Counts")
                 func_counts_data = avg_stats.get('avg_functional_counts', {})
                 if func_counts_data:
-                    func_data = pd.DataFrame({
-                        'Function': list(func_counts_data.keys()),
-                        'Average Count': list(func_counts_data.values())
-                    }).sort_values('Average Count', ascending=False)
-
+                    func_data = pd.DataFrame({'Function': list(func_counts_data.keys()), 'Average Count': list(func_counts_data.values())}).sort_values('Average Count', ascending=False)
                     if not func_data.empty:
                          fig_func_dist = px.bar(func_data, x='Function', y='Average Count', title='Average Card Counts per Tracked Function')
                          st.plotly_chart(fig_func_dist, use_container_width=True)
-                    else:
-                         st.info("No data available for tracked functional categories.")
-                else:
-                    st.info("Functional category counts not calculated or none are tracked.")
-                # --- END ADDED ---
+                    else: st.info("No data available for tracked functional categories.")
+                else: st.info("Functional category counts not calculated or none are tracked.")
 
                 st.subheader("Average Card Type Distribution")
-                type_data = pd.DataFrame({
-                    'Type': list(avg_stats.get('avg_type_counts', {}).keys()),
-                    'Average Count': list(avg_stats.get('avg_type_counts', {}).values())
-                }).sort_values('Average Count', ascending=False)
+                type_data = pd.DataFrame({'Type': list(avg_stats.get('avg_type_counts', {}).keys()), 'Average Count': list(avg_stats.get('avg_type_counts', {}).values())}).sort_values('Average Count', ascending=False)
                 if not type_data.empty:
                      fig_type_dist = px.bar(type_data, x='Type', y='Average Count', title='Average Card Counts per Type')
                      st.plotly_chart(fig_type_dist, use_container_width=True)
@@ -1316,11 +1250,10 @@ def main():
                      st.write(f"- Median Price: ${avg_stats.get('median_deck_price', 0):.2f}")
                      st.write(f"- Average Price: ${avg_stats.get('avg_deck_price', 0):.2f}")
                      st.write(f"- Maximum Price: ${avg_stats.get('max_deck_price', 0):.2f}")
-
             else:
                 st.info("Could not calculate average stats. Ensure data is loaded.")
         # --- END Average Deck Statistics ---
-        
+
         with st.expander("Personal Deckbuilding Tools", expanded=True):
             st.subheader("Analyze Your Decklist")
             decklist_input = st.text_area("Paste your decklist here:", height=200, key="deck_analyzer_input")
@@ -1328,25 +1261,19 @@ def main():
                 user_decklist = parse_decklist(decklist_input)
                 if user_decklist:
                     st.write(f"Analyzing {len(user_decklist)} cards...")
-                    # Ensure POP_ALL has required columns
                     if not POP_ALL.empty and 'inclusion_rate' in POP_ALL.columns and 'name' in POP_ALL.columns:
                          staples = POP_ALL[POP_ALL['inclusion_rate'] >= 75]
                          missing_staples = staples[~staples['name'].isin(user_decklist)]
                          st.write("Popular Staples Missing From Your Deck (>75% inclusion):")
                          st.dataframe(missing_staples[['name', 'inclusion_rate']].round(1))
-                    else:
-                         st.warning("Popularity data unavailable for staple analysis.")
-
-                else:
-                    st.warning("Please paste a decklist to analyze.")
+                    else: st.warning("Popularity data unavailable for staple analysis.")
+                else: st.warning("Please paste a decklist to analyze.")
 
             st.subheader("Generate Average Deck")
-            # Ensure price_clean exists before grouping
             if 'price_clean' in df.columns:
                  deck_prices = df.groupby('deck_id')['price_clean'].sum()
                  if not deck_prices.empty:
                      min_p, max_p = float(deck_prices.min()), float(deck_prices.max())
-                     # Ensure min_p is not greater than max_p for slider
                      if min_p > max_p: min_p = max_p
                      price_range = st.slider("Filter decks by Total Price for Average Deck:", min_value=min_p, max_value=max_p, value=(min_p, max_p))
                      if st.button("📊 Generate Average Deck"):
@@ -1357,11 +1284,8 @@ def main():
                              if avg_deck:
                                  st.info(f"Detected Commander Color Identity: {', '.join(st.session_state.get('commander_colors', ['None']))}")
                                  st.dataframe(pd.DataFrame(avg_deck, columns=["Card Name"]))
-                 else:
-                      st.warning("No price data available to filter for average deck.")
-            else:
-                 st.warning("Price data column ('price_clean') not found.")
-
+                 else: st.warning("No price data available to filter for average deck.")
+            else: st.warning("Price data column ('price_clean') not found.")
 
             st.subheader("Generate a Deck Template")
             if FUNCTIONAL_ANALYSIS_ENABLED:
@@ -1370,23 +1294,18 @@ def main():
                 if 'func_constraints' not in st.session_state: st.session_state.func_constraints = {}
                 if 'type_constraints' not in st.session_state: st.session_state.type_constraints = {}
 
-                # Ensure 'category' column exists before processing
+                # Category and type lists are needed for dropdowns/validation
+                func_categories_list = []
                 if 'category' in df.columns:
                     all_individual_categories = df['category'].astype(str).str.split('|').explode()
                     func_categories_list = sorted([cat for cat in all_individual_categories.unique() if pd.notna(cat) and cat not in ['Uncategorized', '']])
-                else:
-                    func_categories_list = []
-                    st.warning("Category data missing, cannot configure functional constraints.")
-
-                # Ensure 'type' column exists before processing
+                
+                type_categories_list = []
                 if 'type' in df.columns:
                      type_categories_list_raw = df['type'].unique()
                      type_categories_list = sorted([t for t in type_categories_list_raw if pd.notna(t)])
-                else:
-                     type_categories_list = []
-                     st.warning("Type data missing, cannot configure type constraints.")
 
-            with st.expander("Step 2: Configure Card Type Constraints"):
+                with st.expander("Step 2: Configure Card Type Constraints"): # Renamed from Step 1
                     available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
                     if available_types:
                         col1, col2 = st.columns([3, 1])
@@ -1394,9 +1313,8 @@ def main():
                         if col2.button("Add Type", key="add_type_btn") and new_type:
                             st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
                             st.rerun()
-                    elif type_categories_list: # Only show message if types exist but are all used
+                    elif type_categories_list:
                          st.info("All available card types have been added.")
-
 
                     for ctype in list(st.session_state.type_constraints.keys()):
                         col1, col2 = st.columns([4, 1])
@@ -1404,317 +1322,208 @@ def main():
                         if col2.button("Remove", key=f"del_type_{ctype}"):
                             del st.session_state.type_constraints[ctype]
                             st.rerun()
-with st.form(key='template_form'):
-                st.write("---")
-                st.write("**Step 3: Define Must-Haves, Exclusions, Ranges, and Generate**")
 
-                col_must, col_exclude = st.columns(2)
-                with col_must:
-                    template_must_haves = st.text_area("Must-Include Cards (one per line):", height=150, key="template_must_haves")
-                with col_exclude:
-                    template_must_excludes = st.text_area("Must-Exclude Cards (one per line):", height=150, key="template_must_excludes")
+                with st.form(key='template_form'):
+                    st.write("---")
+                    st.write("**Step 3: Define Must-Haves, Exclusions, Ranges, and Generate**") # Renamed from Step 2
 
-                # Get active categories to display sliders for
-                active_categories_in_form = st.session_state.get('active_func_categories', [])
+                    col_must, col_exclude = st.columns(2)
+                    with col_must:
+                        template_must_haves = st.text_area("Must-Include Cards (one per line):", height=150, key="template_must_haves")
+                    with col_exclude:
+                        template_must_excludes = st.text_area("Must-Exclude Cards (one per line):", height=150, key="template_must_excludes")
 
-                if not active_categories_in_form and not st.session_state.type_constraints:
-                    st.info("Add functional categories (in Avg Stats section) or card type constraints above to set their ranges here.")
+                    active_categories_in_form = st.session_state.get('active_func_categories', [])
 
-                # --- Loop 1: Functional Constraints (Sliders/Number Inputs) ---
-                st.write("**Set Functional Constraint Ranges:**")
-                if not active_categories_in_form:
-                     st.info("No functional categories selected in the 'Average Deck Statistics' section.")
+                    if not active_categories_in_form and not st.session_state.type_constraints:
+                        st.info("Add functional categories (in Avg Stats section) or card type constraints above to set their ranges here.")
 
-                # THIS IS THE CORRECT AND ONLY LOOP FOR FUNCTIONAL SLIDERS
-                for func in sorted(active_categories_in_form): # Iterate through ACTIVE list
-                    # Initialize constraint if it doesn't exist for this active category
-                    if func not in st.session_state.func_constraints:
-                         st.session_state.func_constraints[func] = (8, 12) if func in ['Ramp', 'Card Advantage'] else (2, 8)
+                    st.write("**Set Functional Constraint Ranges:**")
+                    if not active_categories_in_form:
+                         st.info("No functional categories selected in the 'Average Deck Statistics' section.")
 
-                    value = st.session_state.func_constraints[func] # Get current or default value
-                    current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (2, 8) # Fallback default
+                    for func in sorted(active_categories_in_form):
+                        if func not in st.session_state.func_constraints:
+                             st.session_state.func_constraints[func] = (8, 12) if func in ['Ramp', 'Card Advantage'] else (2, 8)
+                        value = st.session_state.func_constraints[func]
+                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (2, 8)
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1: new_range = st.slider(f"'{func}' count", 0, 40, current_value, key=f"slider_func_{func}")
+                        with c2: min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
+                        with c3: max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
+                        if (min_val, max_val) != new_range:
+                             st.session_state.func_constraints[func] = (min_val, max_val); st.rerun()
+                        else: st.session_state.func_constraints[func] = new_range
 
-                    c1, c2, c3 = st.columns([4, 1, 1])
-                    with c1:
-                        # Use unique key for the slider
-                        new_range = st.slider(f"'{func}' count", 0, 40, current_value, key=f"slider_func_{func}")
-                    with c2:
-                         # Use unique key for the number input
-                        min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
-                    with c3:
-                         # Use unique key for the number input
-                        max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
-                    # Update session state if number inputs change the value
-                    if (min_val, max_val) != new_range:
-                         st.session_state.func_constraints[func] = (min_val, max_val)
-                         st.rerun() # Rerun needed to update the slider
-                    else:
-                         st.session_state.func_constraints[func] = new_range
-                # --- End Loop 1 ---
+                    st.write("**Set Card Type Constraint Ranges:**")
+                    if not st.session_state.type_constraints:
+                        st.info("No card type constraints configured.")
+                    for ctype, value in st.session_state.type_constraints.items():
+                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15)
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1: new_range = st.slider(f"'{ctype}' count", 0, 60, current_value, key=f"slider_type_{ctype}")
+                        with c2: min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
+                        with c3: max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
+                        if (min_val, max_val) != new_range:
+                             st.session_state.type_constraints[ctype] = (min_val, max_val); st.rerun()
+                        else: st.session_state.type_constraints[ctype] = new_range
 
-                # --- Loop 2: Type Constraints (Sliders/Number Inputs) ---
-                st.write("**Set Card Type Constraint Ranges:**")
-                if not st.session_state.type_constraints:
-                    st.info("No card type constraints configured.")
+                    submitted = st.form_submit_button("📋 Generate Deck With Constraints")
 
-                for ctype, value in st.session_state.type_constraints.items():
-                    current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15) # Default range
-                    c1, c2, c3 = st.columns([4, 1, 1])
-                    with c1:
-                         new_range = st.slider(f"'{ctype}' count", 0, 60, current_value, key=f"slider_type_{ctype}")
-                    with c2:
-                         min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
-                    with c3:
-                         max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
-                    # Update session state if number inputs change the value
-                    if (min_val, max_val) != new_range:
-                         st.session_state.type_constraints[ctype] = (min_val, max_val)
-                         st.rerun() # Rerun needed to update the slider
-                    else:
-                         st.session_state.type_constraints[ctype] = new_range
-                # --- End Loop 2 ---
+                    if submitted:
+                        if POP_ALL.empty or 'name' not in POP_ALL.columns or 'count' not in POP_ALL.columns:
+                            st.error("Popularity data is missing or invalid. Cannot generate deck template.")
+                        else: # << CORRECTED INDENTATION
+                            constraints = {'functions': {}, 'types': {}}
+                            for func in active_categories_in_form:
+                                 if func in st.session_state.func_constraints:
+                                      val_tuple = st.session_state.func_constraints[func]
+                                      if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2: constraints['functions'][func] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
+                                      else: st.warning(f"Invalid range for function '{func}'. Using default [2, 8]."); constraints['functions'][func] = {'target': [2, 8], 'current': 0}
+                            for ctype, val_tuple in st.session_state.type_constraints.items():
+                                if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2: constraints['types'][ctype] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
+                                else: st.warning(f"Invalid range for type '{ctype}'. Using default [5, 15]."); constraints['types'][ctype] = {'target': [5, 15], 'current': 0}
 
-                # --- Submit Button ---
-                submitted = st.form_submit_button("📋 Generate Deck With Constraints")
+                            must_haves = parse_decklist(template_must_haves)
+                            must_excludes = parse_decklist(template_must_excludes)
+                            commander_colors = st.session_state.get('commander_colors', [])
 
-                # --- Logic that runs on submission ---
-                if submitted:
-                    # ** CORRECTED INDENTATION **
-                    if POP_ALL.empty or 'name' not in POP_ALL.columns or 'count' not in POP_ALL.columns:
-                        st.error("Popularity data is missing or invalid. Cannot generate deck template.")
-                    # ** CORRECTED INDENTATION **
-                    else:
-                        constraints = {'functions': {}, 'types': {}}
-                        # Populate constraints dict only from the ACTIVE categories present in func_constraints
-                        for func in active_categories_in_form: # Use the active list
-                             if func in st.session_state.func_constraints:
-                                  val_tuple = st.session_state.func_constraints[func]
-                                  if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2:
-                                       constraints['functions'][func] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
-                                  else:
-                                       st.warning(f"Invalid range for function '{func}'. Using default [2, 8].")
-                                       constraints['functions'][func] = {'target': [2, 8], 'current': 0}
+                            with st.spinner("Generating decklists..."):
+                                if 'name' in df.columns and 'category' in df.columns and 'cmc' in df.columns:
+                                    base_candidates = df[~df['name'].isin(must_excludes)].drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name', how='left')
+                                    base_candidates['count'] = base_candidates['count'].fillna(0)
+                                    base_candidates['category_list'] = base_candidates['category'].astype(str).str.split('|')
+                                    candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
+                                    candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
+                                    median_cmc = candidates_eff['cmc'].median() if not candidates_eff['cmc'].isnull().all() else 3
+                                    candidates_eff['cmc_filled'] = pd.to_numeric(candidates_eff['cmc'], errors='coerce').fillna(median_cmc)
+                                    candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc_filled'] + 1).clip(lower=1)
+                                    candidates_eff = candidates_eff.sort_values('efficiency_score', ascending=False)
+                                    pop_deck, _ = _fill_deck_slots(candidates_pop, deepcopy(constraints), initial_decklist=must_haves, lands_df=lands_df[~lands_df['name'].isin(must_excludes)], color_identity=commander_colors)
+                                    eff_deck, _ = _fill_deck_slots(candidates_eff, deepcopy(constraints), initial_decklist=must_haves, lands_df=lands_df[~lands_df['name'].isin(must_excludes)], color_identity=commander_colors)
+                                    pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
+                                    eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
+                                    t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
+                                    with t1: st.dataframe(pop_df)
+                                    with t2: st.dataframe(eff_df)
+                                else: # << CORRECTED INDENTATION
+                                    st.error("Required columns ('name', 'category', 'cmc') not found in data. Cannot generate template.")
+                # --- End st.form block ---
 
-                        for ctype, val_tuple in st.session_state.type_constraints.items():
-                            if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2:
-                                 constraints['types'][ctype] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
-                            else:
-                                 st.warning(f"Invalid range for type '{ctype}'. Using default [5, 15].")
-                                 constraints['types'][ctype] = {'target': [5, 15], 'current': 0}
-
-                        must_haves = parse_decklist(template_must_haves)
-                        must_excludes = parse_decklist(template_must_excludes)
-                        commander_colors = st.session_state.get('commander_colors', [])
-
-                        with st.spinner("Generating decklists..."):
-                            if 'name' in df.columns and 'category' in df.columns and 'cmc' in df.columns:
-                                base_candidates = df[~df['name'].isin(must_excludes)].drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name', how='left')
-                                base_candidates['count'] = base_candidates['count'].fillna(0)
-                                base_candidates['category_list'] = base_candidates['category'].astype(str).str.split('|')
-
-                                candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
-                                candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
-
-                                median_cmc = candidates_eff['cmc'].median() if not candidates_eff['cmc'].isnull().all() else 3
-                                candidates_eff['cmc_filled'] = pd.to_numeric(candidates_eff['cmc'], errors='coerce').fillna(median_cmc)
-                                candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc_filled'] + 1).clip(lower=1)
-                                candidates_eff = candidates_eff.sort_values('efficiency_score', ascending=False)
-
-                                pop_deck, _ = _fill_deck_slots(
-                                    candidates_pop, deepcopy(constraints), initial_decklist=must_haves,
-                                    lands_df=lands_df[~lands_df['name'].isin(must_excludes)],
-                                    color_identity=commander_colors
-                                )
-                                eff_deck, _ = _fill_deck_slots(
-                                    candidates_eff, deepcopy(constraints), initial_decklist=must_haves,
-                                    lands_df=lands_df[~lands_df['name'].isin(must_excludes)],
-                                    color_identity=commander_colors
-                                )
-
-                                pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
-                                eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
-
-                                t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
-                                with t1: st.dataframe(pop_df)
-                                with t2: st.dataframe(eff_df)
-                            # ** CORRECTED INDENTATION **
-                            else:
-                                st.error("Required columns ('name', 'category', 'cmc') not found in data. Cannot generate template.")
-            # --- End st.form block ---
-
-        if st.session_state.gsheets_connected:
-            with st.expander("Card Category Editor", expanded=False):
-                st.info("Here you can add or edit categories for all unique cards found in the current dataset. Changes will be saved to your Google Sheet.")
-                # Ensure df has 'name' column
-                if 'name' in df.columns:
-                     unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
-                     # Ensure categories_df_master has 'name' column
-                     if 'name' in categories_df_master.columns:
-                          editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
-                     else:
-                          st.warning("Master category data is missing 'name' column.")
-                          editor_df = unique_cards_df.copy()
-                          editor_df['category'] = '' # Add empty category column
-
-                     st.write("Edit categories below (use '|' to separate multiple functions):")
-                     # Ensure editor_df is not empty before showing data editor
-                     if not editor_df.empty:
-                          edited_df = st.data_editor(editor_df, key='category_editor', num_rows="dynamic", use_container_width=True, hide_index=True)
-                     else:
-                          st.warning("No unique card names found to edit.")
-                          edited_df = pd.DataFrame(columns=['name', 'category']) # Provide empty df for button logic
-
-
-                     if st.button("💾 Save Changes to Google Sheet"):
-                          with st.spinner("Saving to Google Sheet..."):
-                               # Ensure master_categories exists and is a DataFrame
-                               if 'master_categories' not in st.session_state or not isinstance(st.session_state.master_categories, pd.DataFrame):
-                                   st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
-                               # Ensure it has the 'name' column
-                               if 'name' not in st.session_state.master_categories.columns:
-                                    st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
-
-
-                               # Ensure edited_df exists and has 'name'
-                               if edited_df is not None and 'name' in edited_df.columns:
-                                   updated_master = pd.concat([
-                                       st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])],
-                                       edited_df
-                                   ]).drop_duplicates(subset=['name'], keep='last')
-
-                                   # Filter out rows with empty names and sort
-                                   updated_master = updated_master[updated_master['name'].astype(str) != ''].sort_values('name')
-                                   # Ensure category column exists before saving
-                                   if 'category' not in updated_master.columns:
-                                        updated_master['category'] = ''
-
-                                   try:
-                                        conn.update(worksheet="Categories", data=updated_master)
-                                        st.session_state.master_categories = updated_master
-                                        st.success("Categories saved successfully!")
-                                        time.sleep(1)
-                                        st.rerun()
-                                   except Exception as e:
-                                        st.error(f"Failed to save to Google Sheet: {e}")
-
-                               else:
-                                    st.error("Edited data is invalid or missing 'name' column. Cannot save.")
-
-                else:
-                     st.warning("Card data is missing 'name' column. Cannot initialize category editor.")
-
-
-        with st.expander("Advanced Synergy Tools", expanded=False):
-            # Ensure spells_df exists and is not empty before proceeding
-            if 'spells_df' in locals() and not spells_df.empty and 'name' in spells_df.columns:
-                st.subheader("Card Inspector")
-                all_spells_list = sorted(spells_df['name'].unique())
-                if all_spells_list:
-                    selected_card = st.selectbox("Select a card to inspect:", all_spells_list)
-                    if selected_card:
-                        # Ensure filtered_df exists and has necessary columns
-                        if 'filtered_df' in locals() and not filtered_df.empty and 'name' in filtered_df.columns and 'deck_id' in filtered_df.columns:
-                             decks_with_card = filtered_df[filtered_df['name'] == selected_card]['deck_id'].unique()
-                             synergy_df = filtered_df[filtered_df['deck_id'].isin(decks_with_card)]
-                             synergy_pop = popularity_table(synergy_df)
-                             synergy_pop = synergy_pop[synergy_pop['name'] != selected_card]
-                             st.write(f"Top 20 cards played with '{selected_card}':")
-                             st.dataframe(synergy_pop.head(20))
-                        else:
-                             st.warning("Filtered data is unavailable for card inspection.")
-
-                else:
-                    st.info("No spell names found to inspect.")
-
-
-                st.subheader("Synergy Map")
-                if st.button("🗺️ Create Synergy Map"):
-                    with st.spinner("Generating Synergy Map..."):
-                        # Check required columns
-                        if 'deck_id' in spells_df.columns and 'name' in spells_df.columns:
-                            try:
-                                deck_card_matrix = pd.crosstab(spells_df['deck_id'], spells_df['name'])
-                                if deck_card_matrix.empty or len(deck_card_matrix.columns) < 2:
-                                     st.warning("Not enough data or card variety to generate a synergy map.")
-                                else:
-                                     # Adjust perplexity based on number of features (cards)
-                                     perplexity_value = min(30, len(deck_card_matrix.columns) - 1)
-                                     tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity_value, n_iter=300, init='pca') # Faster iteration
-                                     embedding = tsne.fit_transform(deck_card_matrix.T)
-
-                                     plot_df = pd.DataFrame(embedding, columns=['x', 'y'])
-                                     plot_df['card_name'] = deck_card_matrix.columns
-                                     # Ensure df has 'name' and 'type' for merging
-                                     if 'df' in locals() and 'name' in df.columns and 'type' in df.columns:
-                                          plot_df = pd.merge(plot_df, df[['name', 'type']].drop_duplicates().rename(columns={'name': 'card_name'}), on='card_name', how='left')
-                                     else:
-                                          plot_df['type'] = 'Unknown' # Add default if type info missing
-
-                                     fig = px.scatter(plot_df, x='x', y='y', hover_name='card_name', color='type', title='Card Synergy Map', height=800)
-                                     st.plotly_chart(fig, use_container_width=True)
-                            except ValueError as ve:
-                                 st.error(f"Error generating synergy map: {ve}. Try reducing the number of cards or adjusting parameters.")
-                            except Exception as e:
-                                 st.error(f"An unexpected error occurred during synergy map generation: {e}")
-
-                        else:
-                             st.warning("Required columns ('deck_id', 'name') not found in spell data for synergy map.")
-
-
-                st.subheader("Synergy Heatmap")
-                h_col1, h_col2 = st.columns(2)
-                with h_col1:
-                    heatmap_top_n = st.slider('Top N for Heatmap:', 10, 50, 25, 5, key="heatmap_top_n")
-                with h_col2:
-                    heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1, key="heatmap_exclude_n")
-                if st.button("🔥 Build Heatmap"):
-                    with st.spinner("Building Heatmap..."):
-                        # Ensure POP_ALL exists and has necessary columns
-                        if 'POP_ALL' in locals() and not POP_ALL.empty and 'name' in POP_ALL.columns:
-                             co = build_cococcurrence(filtered_df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
-                             if co.empty: st.warning("Co-occurrence matrix is empty. Try adjusting N values.")
-                             else:
-                                 title = f'Card Co-occurrence (Top {heatmap_top_n}, excluding {heatmap_exclude_n})'
-                                 fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=700)
-                                 st.plotly_chart(fig, use_container_width=True)
-                        else:
-                             st.warning("Popularity data (POP_ALL) unavailable for heatmap generation.")
-
-
-                st.subheader("Synergy Packages")
-                COMMON_STAPLES = ['Sol Ring', 'Arcane Signet', 'Command Tower', 'Lightning Greaves', 'Swiftfoot Boots']
-                packages_exclude_staples = st.multiselect('Exclude Staples from Packages:', options=COMMON_STAPLES, default=['Sol Ring', 'Arcane Signet'])
-                packages_support_slider = st.slider('Min Support %:', 0.1, 0.7, 0.3, 0.05)
-                if st.button("📦 Find Synergy Packages"):
-                    with st.spinner("Finding packages..."):
-                         # Check required columns
-                        if 'deck_id' in spells_df.columns and 'name' in spells_df.columns:
-                             spells_to_analyze = spells_df[~spells_df['name'].isin(packages_exclude_staples)]
-                             if not spells_to_analyze.empty:
-                                 deck_card_matrix = pd.crosstab(spells_to_analyze['deck_id'], spells_to_analyze['name']) > 0
-                                 if not deck_card_matrix.empty:
-                                      frequent_itemsets = apriori(deck_card_matrix, min_support=packages_support_slider, use_colnames=True)
-                                      if frequent_itemsets.empty: st.warning("No packages found. Try lowering 'Min Support %'.")
-                                      else:
-                                          frequent_itemsets['length'] = frequent_itemsets['itemsets'].apply(len)
-                                          result = frequent_itemsets[frequent_itemsets['length'] >= 2].sort_values(['length', 'support'], ascending=False)
-                                          result['itemsets'] = result['itemsets'].apply(lambda x: ', '.join(list(x)))
-                                          st.write(f"Found {len(result)} Synergy Packages:")
-                                          st.dataframe(result)
-                                 else:
-                                      st.warning("Could not create deck-card matrix for package analysis.")
-
-                             else:
-                                 st.warning("No spells left to analyze after excluding staples.")
-
-                        else:
-                             st.warning("Required columns ('deck_id', 'name') not found in spell data for package analysis.")
-
+            # << CORRECTED INDENTATION FOR THIS ELSE >>
             else:
-                 st.info("Load data to enable Advanced Synergy Tools.")
+                st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
 
+            # --- Card Category Editor ---
+            if st.session_state.gsheets_connected:
+                with st.expander("Card Category Editor", expanded=False):
+                    st.info("Here you can add or edit categories for all unique cards found in the current dataset. Changes will be saved to your Google Sheet.")
+                    if 'name' in df.columns:
+                         unique_cards_df = pd.DataFrame(df['name'].unique(), columns=['name']).sort_values('name').reset_index(drop=True)
+                         if 'name' in categories_df_master.columns:
+                              editor_df = pd.merge(unique_cards_df, categories_df_master, on='name', how='left').fillna('')
+                         else:
+                              st.warning("Master category data is missing 'name' column.")
+                              editor_df = unique_cards_df.copy(); editor_df['category'] = ''
+                         st.write("Edit categories below (use '|' to separate multiple functions):")
+                         if not editor_df.empty:
+                              edited_df = st.data_editor(editor_df, key='category_editor', num_rows="dynamic", use_container_width=True, hide_index=True)
+                         else:
+                              st.warning("No unique card names found to edit."); edited_df = pd.DataFrame(columns=['name', 'category'])
 
-    else:
+                         if st.button("💾 Save Changes to Google Sheet"):
+                              with st.spinner("Saving to Google Sheet..."):
+                                   if 'master_categories' not in st.session_state or not isinstance(st.session_state.master_categories, pd.DataFrame): st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
+                                   if 'name' not in st.session_state.master_categories.columns: st.session_state.master_categories = pd.DataFrame(columns=['name', 'category'])
+                                   if edited_df is not None and 'name' in edited_df.columns:
+                                       updated_master = pd.concat([st.session_state.master_categories[~st.session_state.master_categories['name'].isin(edited_df['name'])], edited_df]).drop_duplicates(subset=['name'], keep='last')
+                                       updated_master = updated_master[updated_master['name'].astype(str) != ''].sort_values('name')
+                                       if 'category' not in updated_master.columns: updated_master['category'] = ''
+                                       try:
+                                            conn.update(worksheet="Categories", data=updated_master)
+                                            st.session_state.master_categories = updated_master
+                                            st.success("Categories saved successfully!"); time.sleep(1); st.rerun()
+                                       except Exception as e: st.error(f"Failed to save to Google Sheet: {e}")
+                                   else: st.error("Edited data is invalid or missing 'name' column. Cannot save.")
+                    else: st.warning("Card data is missing 'name' column. Cannot initialize category editor.")
+
+            # --- Advanced Synergy Tools ---
+            with st.expander("Advanced Synergy Tools", expanded=False):
+                if 'spells_df' in locals() and not spells_df.empty and 'name' in spells_df.columns:
+                    st.subheader("Card Inspector")
+                    all_spells_list = sorted(spells_df['name'].unique())
+                    if all_spells_list:
+                        selected_card = st.selectbox("Select a card to inspect:", all_spells_list)
+                        if selected_card:
+                            if 'filtered_df' in locals() and not filtered_df.empty and 'name' in filtered_df.columns and 'deck_id' in filtered_df.columns:
+                                 decks_with_card = filtered_df[filtered_df['name'] == selected_card]['deck_id'].unique()
+                                 synergy_df = filtered_df[filtered_df['deck_id'].isin(decks_with_card)]
+                                 synergy_pop = popularity_table(synergy_df)
+                                 synergy_pop = synergy_pop[synergy_pop['name'] != selected_card]
+                                 st.write(f"Top 20 cards played with '{selected_card}':"); st.dataframe(synergy_pop.head(20))
+                            else: st.warning("Filtered data is unavailable for card inspection.")
+                    else: st.info("No spell names found to inspect.")
+
+                    st.subheader("Synergy Map")
+                    if st.button("🗺️ Create Synergy Map"):
+                        with st.spinner("Generating Synergy Map..."):
+                            if 'deck_id' in spells_df.columns and 'name' in spells_df.columns:
+                                try:
+                                    deck_card_matrix = pd.crosstab(spells_df['deck_id'], spells_df['name'])
+                                    if deck_card_matrix.empty or len(deck_card_matrix.columns) < 2: st.warning("Not enough data or card variety to generate a synergy map.")
+                                    else:
+                                         perplexity_value = min(30, len(deck_card_matrix.columns) - 1)
+                                         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity_value, n_iter=300, init='pca')
+                                         embedding = tsne.fit_transform(deck_card_matrix.T)
+                                         plot_df = pd.DataFrame(embedding, columns=['x', 'y'])
+                                         plot_df['card_name'] = deck_card_matrix.columns
+                                         if 'df' in locals() and 'name' in df.columns and 'type' in df.columns: plot_df = pd.merge(plot_df, df[['name', 'type']].drop_duplicates().rename(columns={'name': 'card_name'}), on='card_name', how='left')
+                                         else: plot_df['type'] = 'Unknown'
+                                         fig = px.scatter(plot_df, x='x', y='y', hover_name='card_name', color='type', title='Card Synergy Map', height=800)
+                                         st.plotly_chart(fig, use_container_width=True)
+                                except ValueError as ve: st.error(f"Error generating synergy map: {ve}.")
+                                except Exception as e: st.error(f"An unexpected error occurred during synergy map generation: {e}")
+                            else: st.warning("Required columns ('deck_id', 'name') not found in spell data for synergy map.")
+
+                    st.subheader("Synergy Heatmap")
+                    h_col1, h_col2 = st.columns(2)
+                    with h_col1: heatmap_top_n = st.slider('Top N for Heatmap:', 10, 50, 25, 5, key="heatmap_top_n")
+                    with h_col2: heatmap_exclude_n = st.slider('Exclude Staples:', 0, 25, 0, 1, key="heatmap_exclude_n")
+                    if st.button("🔥 Build Heatmap"):
+                        with st.spinner("Building Heatmap..."):
+                            if 'POP_ALL' in locals() and not POP_ALL.empty and 'name' in POP_ALL.columns:
+                                 co = build_cococcurrence(filtered_df, topN=heatmap_top_n, exclude_staples_n=heatmap_exclude_n, pop_all_df=POP_ALL)
+                                 if co.empty: st.warning("Co-occurrence matrix is empty. Try adjusting N values.")
+                                 else:
+                                     title = f'Card Co-occurrence (Top {heatmap_top_n}, excluding {heatmap_exclude_n})'
+                                     fig = px.imshow(co, color_continuous_scale='Purples', title=title, height=700, width=700)
+                                     st.plotly_chart(fig, use_container_width=True)
+                            else: st.warning("Popularity data (POP_ALL) unavailable for heatmap generation.")
+
+                    st.subheader("Synergy Packages")
+                    COMMON_STAPLES = ['Sol Ring', 'Arcane Signet', 'Command Tower', 'Lightning Greaves', 'Swiftfoot Boots']
+                    packages_exclude_staples = st.multiselect('Exclude Staples from Packages:', options=COMMON_STAPLES, default=['Sol Ring', 'Arcane Signet'])
+                    packages_support_slider = st.slider('Min Support %:', 0.1, 0.7, 0.3, 0.05)
+                    if st.button("📦 Find Synergy Packages"):
+                        with st.spinner("Finding packages..."):
+                            if 'deck_id' in spells_df.columns and 'name' in spells_df.columns:
+                                 spells_to_analyze = spells_df[~spells_df['name'].isin(packages_exclude_staples)]
+                                 if not spells_to_analyze.empty:
+                                     deck_card_matrix = pd.crosstab(spells_to_analyze['deck_id'], spells_to_analyze['name']) > 0
+                                     if not deck_card_matrix.empty:
+                                          frequent_itemsets = apriori(deck_card_matrix, min_support=packages_support_slider, use_colnames=True)
+                                          if frequent_itemsets.empty: st.warning("No packages found. Try lowering 'Min Support %'.")
+                                          else:
+                                              frequent_itemsets['length'] = frequent_itemsets['itemsets'].apply(len)
+                                              result = frequent_itemsets[frequent_itemsets['length'] >= 2].sort_values(['length', 'support'], ascending=False)
+                                              result['itemsets'] = result['itemsets'].apply(lambda x: ', '.join(list(x)))
+                                              st.write(f"Found {len(result)} Synergy Packages:"); st.dataframe(result)
+                                     else: st.warning("Could not create deck-card matrix for package analysis.")
+                                 else: st.warning("No spells left to analyze after excluding staples.")
+                            else: st.warning("Required columns ('deck_id', 'name') not found in spell data for package analysis.")
+                else: st.info("Load data to enable Advanced Synergy Tools.")
+
+    else: # This else corresponds to 'if df_raw is not None:'
         st.info("👋 Welcome! Please upload a CSV or scrape new data using the sidebar to get started.")
 
 if __name__ == "__main__":
