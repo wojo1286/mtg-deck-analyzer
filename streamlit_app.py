@@ -384,16 +384,15 @@ def clean_and_prepare_data(_df, _categories_df=None):
     
     return dfc, functional_analysis_enabled, num_decks, pop_all
 
-@st.cache_data # Make sure this decorator is uncommented
-def calculate_average_stats(_df, num_decks):
+@st.cache_data
+def calculate_average_stats(_df, num_decks, active_func_categories=[]): # Added active_func_categories parameter
     """Calculates average statistics across all decks in the DataFrame,
-       inferring basic land counts."""
+       inferring basic land counts and calculating active functional categories."""
     if _df.empty or num_decks == 0:
         return {}
 
     stats = {}
     df_copy = _df.copy()
-    # Convert CMC to numeric early, coercing errors to NaN
     df_copy['cmc_filled'] = pd.to_numeric(df_copy['cmc'], errors='coerce')
 
     # --- Determine Primary Type ---
@@ -402,15 +401,12 @@ def calculate_average_stats(_df, num_decks):
 
     # --- Infer Basic Lands per Deck ---
     deck_known_counts = df_copy.groupby('deck_id').size().reset_index(name='known_cards')
-    deck_known_counts['inferred_basics'] = (100 - deck_known_counts['known_cards']).clip(lower=0) # Ensure non-negative
+    deck_known_counts['inferred_basics'] = (100 - deck_known_counts['known_cards']).clip(lower=0)
     avg_basic_count = deck_known_counts['inferred_basics'].mean()
 
     # --- Calculate Non-Land CMC Stats ---
-    # 1. Filter out lands
     non_land_df = df_copy[df_copy['primary_type'] != 'Land'].copy()
-    # 2. Drop rows where CMC is still NaN (e.g., failed parsing for a non-land card)
     cmc_valid_non_land_df = non_land_df.dropna(subset=['cmc_filled'])
-
     stats['avg_cmc_non_land'] = cmc_valid_non_land_df['cmc_filled'].mean() if not cmc_valid_non_land_df.empty else 0
     stats['median_cmc_non_land'] = cmc_valid_non_land_df['cmc_filled'].median() if not cmc_valid_non_land_df.empty else 0
 
@@ -434,7 +430,6 @@ def calculate_average_stats(_df, num_decks):
     for basic in basic_land_names:
          if basic in avg_type_counts:
              del avg_type_counts[basic]
-
     stats['avg_type_counts'] = avg_type_counts.to_dict()
 
     # --- Calculate Percentages based on 100 total cards ---
@@ -446,6 +441,28 @@ def calculate_average_stats(_df, num_decks):
     else:
         stats['avg_type_percentages'] = {t: 0 for t in valid_counts.keys()}
 
+    # --- NEW: Calculate Active Functional Category Averages ---
+    stats['avg_functional_counts'] = {}
+    if 'category' in df_copy.columns and not df_copy['category'].isnull().all():
+        # Create 'category_list' column safely
+        df_copy['category_list'] = df_copy['category'].fillna('').astype(str).str.split('|')
+        # Explode into individual categories per card per deck
+        exploded_cats = df_copy.explode('category_list')
+        # Filter out empty strings or 'Uncategorized' resulting from split/explode
+        exploded_cats = exploded_cats[
+            (exploded_cats['category_list'] != '') & \
+            (exploded_cats['category_list'] != 'Uncategorized') & \
+            pd.notna(exploded_cats['category_list'])
+        ]
+        # Count occurrences of each category per deck
+        category_deck_counts = exploded_cats.groupby('deck_id')['category_list'].value_counts().unstack(fill_value=0)
+        # Calculate the average count across all decks
+        avg_category_counts_all = category_deck_counts.mean()
+        # Filter for only the active categories
+        stats['avg_functional_counts'] = {
+            cat: avg_category_counts_all.get(cat, 0) for cat in active_func_categories
+        }
+    # --- END NEW ---
 
     # --- Price Stats (if available) ---
     if 'price_clean' in df_copy.columns:
@@ -1184,63 +1201,102 @@ def main():
             else:
                  st.write("CMC data missing or invalid for mana curve.")
 
+# --- Average Deck Statistics Section ---
+        with st.expander("📊 Average Deck Statistics", expanded=True): # Expanded by default now
 
-        
-        if FUNCTIONAL_ANALYSIS_ENABLED and not spells_df.empty and 'category' in spells_df.columns:
-            with st.expander("Functional Analysis"):
-                func_df = spells_df.copy()
-                func_df['category'] = func_df['category'].fillna('Uncategorized')
-                # Ensure category column is string type before splitting
-                func_df['category_list'] = func_df['category'].astype(str).str.split('|')
-                func_df = func_df.explode('category_list').loc[lambda d: (d['category_list'] != 'Uncategorized') & (d['category_list'] != '') & pd.notna(d['category_list'])]
+            # --- ADDED: Functional Category Management UI ---
+            if FUNCTIONAL_ANALYSIS_ENABLED:
+                st.subheader("Functional Category Tracking")
+                active_categories = st.session_state.get('active_func_categories', [])
 
-                if not func_df.empty:
-                    fc1, fc2 = st.columns(2)
-                    with fc1:
-                        # Check if path column exists before creating sunburst
-                        if 'category_list' in func_df.columns:
-                             sunburst_fig = px.sunburst(func_df, path=['category_list'], title='Functional Breakdown'); st.plotly_chart(sunburst_fig, use_container_width=True)
-                        else:
-                             st.write("Category list data missing for sunburst chart.")
-                    with fc2:
-                        # Ensure required columns exist and are valid before creating box plot
-                        if 'category_list' in func_df.columns and 'cmc' in func_df.columns and pd.api.types.is_numeric_dtype(func_df['cmc']):
-                             box_fig = px.box(func_df, x='category_list', y='cmc', title='CMC Distribution by Function'); st.plotly_chart(box_fig, use_container_width=True)
-                        else:
-                             st.write("CMC or category data missing/invalid for box plot.")
+                st.write("**Add/Remove Functional Categories to Track:**")
+                # Ensure all_func_categories is defined from the initialization block
+                if 'all_func_categories' not in locals(): all_func_categories = []
 
+                add_options = sorted([
+                    cat for cat in all_func_categories
+                    if cat not in active_categories
+                ])
+                col1_add, col2_add = st.columns([3, 1])
+                new_func_to_add = col1_add.selectbox(
+                    "Select category to add:",
+                    options=add_options,
+                    key="add_func_select_stats", # Use a unique key
+                    index=None,
+                    placeholder="Choose function..."
+                )
+                if col2_add.button("Add Category", key="add_new_func_btn_stats"): # Use a unique key
+                    if new_func_to_add:
+                        st.session_state.active_func_categories.append(new_func_to_add)
+                        # Initialize constraint if generating templates
+                        if 'func_constraints' in st.session_state:
+                              st.session_state.func_constraints[new_func_to_add] = (8, 12) if new_func_to_add in ['Ramp', 'Card Advantage'] else (2, 8)
+                        st.rerun()
+
+                st.write("**Currently Tracked Categories:**")
+                if not active_categories:
+                     st.info("No functional categories are currently being tracked. Add some above.")
                 else:
-                    st.info("No categorized card functions found to display in the analysis.")
+                    cols_per_row = 4 # Adjust how many remove buttons per row
+                    num_rows = (len(active_categories) + cols_per_row - 1) // cols_per_row
+                    
+                    category_list_sorted = sorted(active_categories) # Sort for consistent display
 
-# --- NEW: Average Deck Statistics Section ---
-        with st.expander("📊 Average Deck Statistics", expanded=False):
-            avg_stats = calculate_average_stats(df, NUM_DECKS)
+                    for i in range(num_rows):
+                        cols = st.columns(cols_per_row)
+                        for j in range(cols_per_row):
+                            idx = i * cols_per_row + j
+                            if idx < len(category_list_sorted):
+                                func = category_list_sorted[idx]
+                                with cols[j]:
+                                    st.markdown(f"- **{func}**")
+                                    if st.button("Remove", key=f"del_active_func_stats_{func}", help=f"Stop tracking {func}"): # Unique key
+                                        st.session_state.active_func_categories.remove(func)
+                                        # Also remove its constraint setting if it exists
+                                        if 'func_constraints' in st.session_state and func in st.session_state.func_constraints:
+                                            del st.session_state.func_constraints[func]
+                                        st.rerun()
+                st.divider() # Separator before stats
+            # --- END ADDED UI ---
+
+            # Pass active categories to the calculation function
+            active_categories_for_stats = st.session_state.get('active_func_categories', [])
+            avg_stats = calculate_average_stats(df, NUM_DECKS, active_categories_for_stats)
 
             if avg_stats:
                 st.subheader("Overall Averages")
                 col_s1, col_s2, col_s3 = st.columns(3)
-                st.write(f"DEBUG - Raw avg_cmc_non_land from dict: {avg_stats.get('avg_cmc_non_land', 'Key Not Found')}")
-                avg_cmc_value = avg_stats.get('avg_cmc_non_land', 0) # Get the value
-                col_s1.metric("Avg. CMC (Non-Lands)", value=round(avg_cmc_value, 2)) # Pass directly, rounded
+                avg_cmc_value = avg_stats.get('avg_cmc_non_land', 0)
+                col_s1.metric("Avg. CMC (Non-Lands)", value=round(avg_cmc_value, 2))
                 col_s2.metric("Avg. Total Lands", f"{avg_stats.get('avg_total_lands', 0):.1f}")
                 col_s3.metric("Avg. Deck Price ($)", f"${avg_stats.get('avg_deck_price', 0):.2f}" if 'avg_deck_price' in avg_stats else "N/A")
+
+                # --- ADDED: Functional Category Stats Display ---
+                st.subheader("Average Functional Category Counts")
+                func_counts_data = avg_stats.get('avg_functional_counts', {})
+                if func_counts_data:
+                    func_data = pd.DataFrame({
+                        'Function': list(func_counts_data.keys()),
+                        'Average Count': list(func_counts_data.values())
+                    }).sort_values('Average Count', ascending=False)
+
+                    if not func_data.empty:
+                         fig_func_dist = px.bar(func_data, x='Function', y='Average Count', title='Average Card Counts per Tracked Function')
+                         st.plotly_chart(fig_func_dist, use_container_width=True)
+                    else:
+                         st.info("No data available for tracked functional categories.")
+                else:
+                    st.info("Functional category counts not calculated or none are tracked.")
+                # --- END ADDED ---
 
                 st.subheader("Average Card Type Distribution")
                 type_data = pd.DataFrame({
                     'Type': list(avg_stats.get('avg_type_counts', {}).keys()),
                     'Average Count': list(avg_stats.get('avg_type_counts', {}).values())
                 }).sort_values('Average Count', ascending=False)
-
                 if not type_data.empty:
                      fig_type_dist = px.bar(type_data, x='Type', y='Average Count', title='Average Card Counts per Type')
                      st.plotly_chart(fig_type_dist, use_container_width=True)
-
-                     # Display percentages
-                     # st.write("Average Type Percentages:")
-                     # perc_df = pd.DataFrame({
-                     #      'Percentage': avg_stats.get('avg_type_percentages', {})
-                     # }).sort_values('Percentage', ascending=False)
-                     # st.dataframe(perc_df.style.format("{:.1f}%"))
 
                 st.subheader("Land Breakdown")
                 st.write(f"- Average Non-Basic Lands: {avg_stats.get('avg_non_basic_lands', 0):.1f}")
@@ -1250,11 +1306,9 @@ def main():
                 cmc_dist_data = avg_stats.get('cmc_distribution', {})
                 if cmc_dist_data:
                      cmc_df = pd.DataFrame(list(cmc_dist_data.items()), columns=['CMC', 'Count']).sort_values('CMC')
-                     # Normalize count to average per deck
                      cmc_df['Average Count per Deck'] = cmc_df['Count'] / NUM_DECKS
                      fig_cmc_dist = px.bar(cmc_df, x='CMC', y='Average Count per Deck', title='Average Non-Land Mana Curve')
                      st.plotly_chart(fig_cmc_dist, use_container_width=True)
-
 
                 if 'avg_deck_price' in avg_stats:
                      st.subheader("Deck Price Range")
@@ -1332,60 +1386,6 @@ def main():
                      type_categories_list = []
                      st.warning("Type data missing, cannot configure type constraints.")
 
-
-            with st.expander("Step 1: Configure Functional Constraints", expanded=True):
-                    # --- MODIFICATION: Use active list and allow adding ---
-                    active_categories = st.session_state.get('active_func_categories', [])
-                    
-                    # Section to add new categories
-                    st.write("**Add Functional Category to Track:**")
-                    # Options are all categories found MINUS those already active
-                    add_options = sorted([
-                        cat for cat in all_func_categories # Use the full list here
-                        if cat not in active_categories
-                    ])
-                    col1_add, col2_add = st.columns([3, 1])
-                    new_func_to_add = col1_add.selectbox(
-                        "Select category to add:",
-                        options=add_options,
-                        key="add_func_select",
-                        index=None,
-                        placeholder="Choose function..."
-                    )
-                    if col2_add.button("Add Category", key="add_new_func_btn") and new_func_to_add:
-                        st.session_state.active_func_categories.append(new_func_to_add)
-                        st.rerun()
-
-                    st.divider() # Separator
-
-                    # Section to manage constraints for ACTIVE categories
-                    st.write("**Configure Constraints for Active Categories:**")
-                    if not active_categories:
-                         st.info("No active functional categories. Add some above.")
-
-                    for func in sorted(list(active_categories)): # Iterate over active list
-                        col1, col2, col3 = st.columns([3, 2, 1])
-                        col1.write(f"- **{func}**")
-                        
-                        # Initialize constraint if not present
-                        if func not in st.session_state.func_constraints:
-                             st.session_state.func_constraints[func] = (8, 12) if func in ['Ramp', 'Card Advantage'] else (2, 8) # Default
-
-                        # Use current value for the slider
-                        current_range = st.session_state.func_constraints[func]
-                        
-                        # Add range display (optional but helpful)
-                        # col2.write(f"Range: {current_range[0]} - {current_range[1]}")
-                        
-                        # Button to remove category from the ACTIVE list
-                        if col3.button("Remove", key=f"del_active_func_{func}"):
-                            st.session_state.active_func_categories.remove(func)
-                            # Also remove its constraint setting
-                            if func in st.session_state.func_constraints:
-                                del st.session_state.func_constraints[func]
-                            st.rerun()
-                    # --- END MODIFICATION ---
-
             with st.expander("Step 2: Configure Card Type Constraints"):
                     available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
                     if available_types:
@@ -1414,7 +1414,37 @@ def main():
                         template_must_haves = st.text_area("Must-Include Cards (one per line):", height=150, key="template_must_haves")
                     with col_exclude:
                         template_must_excludes = st.text_area("Must-Exclude Cards (one per line):", height=150, key="template_must_excludes")
+                    active_categories_in_form = st.session_state.get('active_func_categories', [])
 
+                    if not active_categories_in_form and not st.session_state.type_constraints:
+                        st.info("Add functional categories (in Avg Stats section) or card type constraints above to set their ranges here.")
+
+                    st.write("**Set Functional Constraint Ranges:**")
+                    if not active_categories_in_form:
+                         st.info("No functional categories selected in the 'Average Deck Statistics' section.")
+                    
+                    for func in sorted(active_categories_in_form): # Iterate through ACTIVE list
+                        # Initialize constraint if it doesn't exist for this active category
+                        if func not in st.session_state.func_constraints:
+                             st.session_state.func_constraints[func] = (8, 12) if func in ['Ramp', 'Card Advantage'] else (2, 8)
+
+                        value = st.session_state.func_constraints[func] # Get current or default value
+                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (2, 8) # Fallback default
+
+                        c1, c2, c3 = st.columns([4, 1, 1])
+                        with c1:
+                            new_range = st.slider(f"'{func}' count", 0, 40, current_value, key=f"slider_func_{func}")
+                        with c2:
+                            min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
+                        with c3:
+                            max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
+                        # Update session state if number inputs change the value
+                        if (min_val, max_val) != new_range:
+                             st.session_state.func_constraints[func] = (min_val, max_val)
+                             st.rerun() # Rerun needed to update the slider
+                        else:
+                             st.session_state.func_constraints[func] = new_range
+                    # --- END MODIFICATION ---
 
                     if not st.session_state.func_constraints and not st.session_state.type_constraints:
                         st.info("Add functional or card type constraints above to set their ranges here.")
