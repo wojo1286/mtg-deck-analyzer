@@ -1386,7 +1386,7 @@ def main():
                             del st.session_state.type_constraints[ctype]
                             st.rerun()
 
-                with st.form(key='template_form'):
+            with st.form(key='template_form'):
                     st.write("---")
                     st.write("**Step 3: Define Must-Haves, Exclusions, Ranges, and Generate**")
                     
