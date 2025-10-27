@@ -1505,8 +1505,8 @@ def main():
                                  else:
                                      st.error("Required columns ('name', 'category', 'cmc') not found in data. Cannot generate template.")
 
-            else:
-                st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
+                    else:
+                        st.warning("Import categories or connect to Google Sheets to enable the Deck Template Generator.")
 
         if st.session_state.gsheets_connected:
             with st.expander("Card Category Editor", expanded=False):
