@@ -1238,6 +1238,7 @@ def main():
             if avg_stats:
                 st.subheader("Overall Averages")
                 col_s1, col_s2, col_s3 = st.columns(3)
+                st.write(f"DEBUG - Raw avg_cmc_non_land from dict: {avg_stats.get('avg_cmc_non_land', 'Key Not Found')}")
                 col_s1.metric("Avg. CMC (Non-Lands)", f"{avg_stats.get('avg_cmc_overall', 0):.2f}")
                 col_s2.metric("Avg. Total Lands", f"{avg_stats.get('avg_total_lands', 0):.1f}")
                 col_s3.metric("Avg. Deck Price ($)", f"${avg_stats.get('avg_deck_price', 0):.2f}" if 'avg_deck_price' in avg_stats else "N/A")
