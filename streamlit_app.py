@@ -1305,29 +1305,29 @@ def main():
                      type_categories_list_raw = df['type'].unique()
                      type_categories_list = sorted([t for t in type_categories_list_raw if pd.notna(t)])
 
-                with st.expander("Step 2: Configure Card Type Constraints"): # Renamed from Step 1
+                with st.expander("Step 2: Configure Card Type Constraints"):
                     available_types = [t for t in type_categories_list if t not in st.session_state.type_constraints]
                     if available_types:
                         col1, col2 = st.columns([3, 1])
                         new_type = col1.selectbox("Add card type:", options=available_types, key="new_type_select", index=None, placeholder="Choose a type...")
                         if col2.button("Add Type", key="add_type_btn") and new_type:
                             st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
-                            # --- REMOVED st.rerun() ---
-                            # Let Streamlit handle the update on the next natural run
-                            # Force an immediate rerun just for the button click state update if necessary
-                            st.experimental_rerun() # Or just remove rerun entirely if button works
+                            # --- REMOVED st.experimental_rerun() ---
                     elif type_categories_list:
                          st.info("All available card types have been added.")
 
                     # Display and allow removal (keep this part)
-                    if not st.session_state.type_constraints:
-                         st.write("No card type constraints configured.") # Message moved here
-                    for ctype in list(st.session_state.type_constraints.keys()):
-                        col1, col2 = st.columns([4, 1])
-                        col1.write(f"- **{ctype}**")
-                        if col2.button("Remove", key=f"del_type_{ctype}"):
-                            del st.session_state.type_constraints[ctype]
-                            st.experimental_rerun() # Use experimental rerun after delete
+                    if st.session_state.type_constraints: # Check if dictionary is not empty
+                         st.write("**Configured Type Constraints:**")
+                         for ctype in list(st.session_state.type_constraints.keys()):
+                             col1_disp, col2_disp = st.columns([4, 1])
+                             col1_disp.write(f"- **{ctype}**")
+                             if col2_disp.button("Remove", key=f"del_type_{ctype}"):
+                                 del st.session_state.type_constraints[ctype]
+                                 st.experimental_rerun() # Keep rerun for removal
+                    # Message moved below display loop for clarity
+                    # else:
+                    #      st.write("No card type constraints configured yet.") # Redundant if handled in form
                 
                 with st.form(key='template_form'):
                     st.write("---")
@@ -1339,89 +1339,76 @@ def main():
                     with col_exclude:
                         template_must_excludes = st.text_area("Must-Exclude Cards (one per line):", height=150, key="template_must_excludes")
 
-                    # Get available categories (those tracked in the stats section)
+                    # --- Correctly get available categories ---
+                    # These are the ones actively tracked from the Stats section
                     available_func_categories = sorted(st.session_state.get('active_func_categories', []))
+                    # ---
 
                     st.write("**Select Functional Constraints to Apply:**")
-                    # Use multiselect to choose which functions to constrain
-                    # Initialize session state for selected functions if it doesn't exist
+                    if not available_func_categories:
+                         st.info("No functional categories are being tracked in the 'Average Deck Statistics' section.")
+
                     if 'selected_funcs_for_form' not in st.session_state:
                          st.session_state.selected_funcs_for_form = []
 
-                    # Update selected functions based on multiselect interaction
+                    # Pass the correct options list
                     st.session_state.selected_funcs_for_form = st.multiselect(
                         "Choose functions to set ranges for:",
-                        options=available_func_categories,
-                        default=st.session_state.selected_funcs_for_form, # Persist selection across reruns
+                        options=available_func_categories, # Use the list derived from active_func_categories
+                        default=st.session_state.selected_funcs_for_form,
                         key="func_selector_form"
                     )
 
-                    # --- Loop 1: Functional Constraints (Sliders/Number Inputs for SELECTED functions) ---
+                    # --- Loop 1: Functional Constraints ---
                     st.write("**Set Functional Constraint Ranges:**")
                     if not st.session_state.selected_funcs_for_form:
                          st.info("No functional categories selected above to set ranges for.")
 
-                    # Only display sliders for functions chosen in the multiselect
                     for func in st.session_state.selected_funcs_for_form:
-                        # Initialize constraint range in main dict if needed, but use a generic default
                         if func not in st.session_state.func_constraints:
-                             st.session_state.func_constraints[func] = (5, 15) # Generic default, user will adjust
-
+                             st.session_state.func_constraints[func] = (5, 15)
                         value = st.session_state.func_constraints[func]
-                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15) # Fallback default
-
+                        current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15)
                         c1, c2, c3 = st.columns([4, 1, 1])
-                        with c1:
-                            new_range = st.slider(f"'{func}' count", 0, 40, current_value, key=f"slider_func_{func}")
-                        with c2:
-                            min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
-                        with c3:
-                            max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
-
+                        with c1: new_range = st.slider(f"'{func}' count", 0, 40, current_value, key=f"slider_func_{func}")
+                        with c2: min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
+                        with c3: max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
                         if (min_val, max_val) != new_range:
-                             st.session_state.func_constraints[func] = (min_val, max_val)
-                             st.experimental_rerun()
-                        # No need for the else block if slider directly modifies the same value
-                        # else:
-                        #      st.session_state.func_constraints[func] = new_range # Already done by slider if keys match implicitly? Check behavior.
+                             st.session_state.func_constraints[func] = (min_val, max_val); st.experimental_rerun()
 
-                    # --- Loop 2: Type Constraints (Sliders/Number Inputs) ---
+                    # --- Loop 2: Type Constraints ---
                     st.write("**Set Card Type Constraint Ranges:**")
+                    # Check the session state directly here
                     if not st.session_state.type_constraints:
-                        st.info("No card type constraints configured.") # Moved message outside loop
-                    # Display sliders for types added in Step 2
+                        st.info("No card type constraints configured in Step 2.") # Updated message
+
+                    # Iterate through the constraints dictionary which *should* be updated
                     for ctype, value in st.session_state.type_constraints.items():
                         current_value = value if isinstance(value, (list, tuple)) and len(value) == 2 else (5, 15)
                         c1, c2, c3 = st.columns([4, 1, 1])
-                        with c1:
-                             new_range = st.slider(f"'{ctype}' count", 0, 60, current_value, key=f"slider_type_{ctype}")
-                        with c2:
-                             min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
-                        with c3:
-                             max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
-
+                        with c1: new_range = st.slider(f"'{ctype}' count", 0, 60, current_value, key=f"slider_type_{ctype}")
+                        with c2: min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
+                        with c3: max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
                         if (min_val, max_val) != new_range:
-                             st.session_state.type_constraints[ctype] = (min_val, max_val)
-                             st.experimental_rerun()
-                        # else: # See note above for functional constraints
-                        #      st.session_state.type_constraints[ctype] = new_range
+                             st.session_state.type_constraints[ctype] = (min_val, max_val); st.experimental_rerun()
 
                     # --- Submit Button ---
                     submitted = st.form_submit_button("📋 Generate Deck With Constraints")
 
                     # --- Logic that runs on submission ---
                     if submitted:
+                        # ...(rest of submission logic remains the same)...
                         if POP_ALL.empty or 'name' not in POP_ALL.columns or 'count' not in POP_ALL.columns:
                             st.error("Popularity data is missing or invalid. Cannot generate deck template.")
                         else:
                             constraints = {'functions': {}, 'types': {}}
-                            # Populate constraints dict ONLY from the functions SELECTED in the form
-                            for func in st.session_state.selected_funcs_for_form: # Use selected list
+                            # Use selected_funcs_for_form for constraints
+                            for func in st.session_state.selected_funcs_for_form:
                                  if func in st.session_state.func_constraints:
                                       val_tuple = st.session_state.func_constraints[func]
                                       if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2: constraints['functions'][func] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
                                       else: st.warning(f"Invalid range for function '{func}'. Using default [5, 15]."); constraints['functions'][func] = {'target': [5, 15], 'current': 0}
-                            # Populate type constraints as before
+                            # Use type_constraints as before
                             for ctype, val_tuple in st.session_state.type_constraints.items():
                                 if isinstance(val_tuple, (list, tuple)) and len(val_tuple) == 2: constraints['types'][ctype] = {'target': [val_tuple[0], val_tuple[1]], 'current': 0}
                                 else: st.warning(f"Invalid range for type '{ctype}'. Using default [5, 15]."); constraints['types'][ctype] = {'target': [5, 15], 'current': 0}
@@ -1432,29 +1419,20 @@ def main():
 
                             with st.spinner("Generating decklists..."):
                                 if 'name' in df.columns and 'category' in df.columns and 'cmc' in df.columns:
-                                    # Filter candidates outside the fill function
                                     base_candidates = df[~df['name'].isin(must_excludes)].drop_duplicates(subset=['name']).copy().merge(POP_ALL[['name', 'count']], on='name', how='left')
                                     base_candidates['count'] = base_candidates['count'].fillna(0)
                                     base_candidates['category_list'] = base_candidates['category'].astype(str).str.split('|')
-
                                     candidates_pop = base_candidates[~base_candidates['name'].isin(must_haves)].sort_values('count', ascending=False)
                                     candidates_eff = base_candidates[~base_candidates['name'].isin(must_haves)].copy()
-
-                                    # Need a separate lands_df filtered for excludes
                                     filtered_lands_df = lands_df[~lands_df['name'].isin(must_excludes)] if 'lands_df' in locals() and not lands_df.empty else pd.DataFrame()
-
-
                                     median_cmc = candidates_eff['cmc'].median() if not candidates_eff['cmc'].isnull().all() else 3
                                     candidates_eff['cmc_filled'] = pd.to_numeric(candidates_eff['cmc'], errors='coerce').fillna(median_cmc)
                                     candidates_eff['efficiency_score'] = candidates_eff['count'] / (candidates_eff['cmc_filled'] + 1).clip(lower=1)
                                     candidates_eff = candidates_eff.sort_values('efficiency_score', ascending=False)
-
                                     pop_deck, _ = _fill_deck_slots(candidates_pop, deepcopy(constraints), initial_decklist=must_haves, lands_df=filtered_lands_df, color_identity=commander_colors)
                                     eff_deck, _ = _fill_deck_slots(candidates_eff, deepcopy(constraints), initial_decklist=must_haves, lands_df=filtered_lands_df, color_identity=commander_colors)
-
                                     pop_df = pd.DataFrame(pop_deck, columns=["Popularity Build"])
                                     eff_df = pd.DataFrame(eff_deck, columns=["Efficiency Build"])
-
                                     t1, t2 = st.tabs(["Popularity Build", "Efficiency Build"])
                                     with t1: st.dataframe(pop_df)
                                     with t2: st.dataframe(eff_df)
