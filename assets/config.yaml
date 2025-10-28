@@ -1,0 +1,19 @@
+default_functional_categories:
+  - Ramp
+  - Card Advantage
+  - Removal
+  - Sweeper
+  - Tutor
+  - Protection
+  - Recursion
+  - Counterspell
+
+type_keywords:
+  - Creature
+  - Instant
+  - Sorcery
+  - Artifact
+  - Enchantment
+  - Planeswalker
+  - Land
+  - Battle
