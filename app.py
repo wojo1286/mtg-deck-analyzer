@@ -1,69 +1,121 @@
+# app.py
 import streamlit as st
-from core.cache import ensure_playwright
-from core.config import DEFAULT_FUNCTIONAL_CATEGORIES
+
 from data.scraping import scrape_deck_metadata
-from data.decklists import fetch_decklists
-from analysis.stats import inclusion_table, mana_curve, type_breakdown, cooccurrence_matrix, budget_filtered
-import plotly.express as px
+from data.decklists import fetch_decklists_shared
 
-commander = "atraxa-praetors-voice"
-df_decks = scrape_deck_metadata(commander)
-df_cards = fetch_decklists(df_decks, max_decks=3)
+from ui.dashboard import (
+    render_parsed,
+    render_popularity,
+    render_curve,
+    render_types,
+    render_cooccurrence,
+)
 
-st.subheader("Parsed Cards")
-st.dataframe(df_cards, use_container_width=True, height=300)
+from analysis.stats import budget_filtered
 
-# --- optional budget filter (per-card price cap) ---
-with st.expander("Budget Filter", expanded=False):
-    cap = st.number_input("Exclude cards above this price (keeps unknown prices)", min_value=0.0, value=0.0, step=0.5)
-filtered = budget_filtered(df_cards, cap if cap and cap > 0 else None)
+from ui.dashboard import render_deck_generator
 
-# --- Popularity / Inclusion ---
-st.subheader("Card Popularity & Inclusion")
-inc = inclusion_table(filtered)
-st.dataframe(inc.head(50), use_container_width=True, height=420)
-if not inc.empty:
-    fig_pop = px.bar(inc.head(25), x="count", y="name", orientation="h",
-                     hover_data=["inclusion_rate","avg_price","avg_cmc","type"],
-                     title="Top 25 by # of Decks")
-    fig_pop.update_layout(yaxis=dict(autorange="reversed"))
-    st.plotly_chart(fig_pop, use_container_width=True)
+st.set_page_config(page_title="MTG Deckbuilding Analysis Tool - Modular Version", layout="wide")
+st.title("MTG Deckbuilding Analysis Tool - Modular Version")
 
-# --- Mana Curve ---
-st.subheader("Mana Curve (Spells Only)")
-curve = mana_curve(filtered)
-if not curve.empty:
-    st.plotly_chart(px.bar(curve, x="cmc", y="count", title="Spell CMC Distribution"),
-                    use_container_width=True)
-else:
-    st.info("No spell CMC data available.")
+# --- Sidebar controls ---
+with st.sidebar:
+    st.header("Data Source")
+    commander = st.text_input("Commander slug (EDHREC)", value="atraxa-praetors-voice",
+                              help="Example: 'ojer-axonil-deepest-might'")
+    deck_limit = st.slider("How many decks to scrape", min_value=1, max_value=50, value=3, step=1)
 
-# --- Type Breakdown ---
-st.subheader("Average Card Type Counts per Deck")
-types_avg = type_breakdown(filtered)
-if not types_avg.empty:
-    st.plotly_chart(px.bar(types_avg, x="type", y="avg_count_per_deck", title="Average per Deck"),
-                    use_container_width=True)
-else:
-    st.info("No type data available.")
-
-# --- Co-occurrence Matrix ---
-st.subheader("Card Co-occurrence (Top N)")
-top_n = st.slider("Top N cards to include in co-occurrence matrix:", 10, 100, 40, step=5)
-cooc = cooccurrence_matrix(filtered, top_n=top_n)
-if not cooc.empty:
-    # Heatmap-friendly long form
-    cooc_long = cooc.stack().reset_index()
-    cooc_long.columns = ["Card A", "Card B", "Co-occurs in # Decks"]
-    fig_heat = px.density_heatmap(
-        cooc_long, x="Card A", y="Card B", z="Co-occurs in # Decks",
-        nbinsx=len(cooc.index), nbinsy=len(cooc.columns),
-        histfunc="sum", title="Co-occurrence Heatmap (Deck Count)"
+    st.divider()
+    st.header("Budget Preset")
+    preset = st.radio(
+        "Price cap per card",
+        ["No cap", "$1", "$5", "$10", "$25", "Custom…"],
+        index=0,
     )
-    # keep squares readable
-    fig_heat.update_layout(xaxis_nticks=min(50, len(cooc.columns)),
-                           yaxis_nticks=min(50, len(cooc.index)))
-    st.plotly_chart(fig_heat, use_container_width=True)
-    st.caption("Diagonal shows how many decks each card appears in (self-count).")
-else:
-    st.info("Co-occurrence matrix is empty (try increasing Top N).")
+    custom_cap = None
+    if preset == "No cap":
+        cap = None
+    elif preset == "$1":
+        cap = 1.0
+    elif preset == "$5":
+        cap = 5.0
+        # fallthrough handled
+    elif preset == "$10":
+        cap = 10.0
+    elif preset == "$25":
+        cap = 25.0
+    else:
+        custom_cap = st.number_input("Custom cap ($)", min_value=0.0, value=5.0, step=0.5)
+        cap = custom_cap
+
+# --- Fetch deck metadata ---
+with st.spinner(f"Fetching EDHREC deck metadata for commander: {commander}"):
+    df_decks = scrape_deck_metadata(commander)
+
+if df_decks is None or df_decks.empty:
+    st.warning("No deck metadata returned. Try a different commander slug or check connectivity.")
+    st.stop()
+
+# --- Scrape deckpreview pages and parse cards (shared browser) ---
+with st.spinner(f"Scraping up to {deck_limit} decks and parsing card tables..."):
+    df_cards = fetch_decklists_shared(df_decks, max_decks=deck_limit)
+
+if df_cards is None or df_cards.empty:
+    st.warning("No cards were parsed from any deck. Try a different commander or increase the number of decks.")
+    st.stop()
+
+
+# --- Apply budget filter once; all charts use this 'filtered' ---
+filtered = budget_filtered(df_cards, cap)
+
+# --- Quick “nothing to show” nudge if filters removed everything ---
+if filtered.empty:
+    st.info("Your filters removed all cards. Try lowering the budget cap or scraping more decks.")
+    st.stop()
+
+# --- Popularity/type filters in one place ---
+with st.expander("Advanced Filters", expanded=False):
+    unique_types = sorted([t for t in filtered["type"].dropna().unique().tolist() if t])
+    exclude_types = st.multiselect("Exclude types", options=unique_types, default=[])
+    exclude_top_n = st.slider("Exclude top N staples (by # of decks)", 0, 50, 0, step=5)
+
+# --- Render sections ---
+render_parsed(filtered)
+render_popularity(filtered, top_n=25, price_cap=cap,
+                  exclude_types=exclude_types, exclude_top_n=exclude_top_n)
+render_curve(filtered)
+render_types(filtered)
+
+top_n_cooc = st.slider("Top N cards to include in co-occurrence matrix:", 10, 100, 40, step=5)
+render_cooccurrence(filtered, top_n=top_n_cooc)
+
+from analysis.deckgen import (
+    prepare_candidates,
+    fill_deck_slots,
+    generate_average_deck,
+    summarize_deck,
+)
+
+# Example: build candidates from your scraped df (after any filters)
+cands = prepare_candidates(df_cards, must_exclude=[], must_include=[])
+
+# Example constraints
+type_constraints = {"Creature": (20, 32), "Instant": (5, 12), "Sorcery": (4, 10)}
+func_constraints = {"Ramp": (8, 12), "Card Advantage": (6, 10), "Removal": (6, 10)}
+
+generated = fill_deck_slots(
+    cands,
+    type_constraints=type_constraints,
+    func_constraints=func_constraints,
+    initial=[],               # your must-haves list
+    total_size=100,
+    prefer_nonlands_until=60  # optional early spell bias
+)
+
+summary = summarize_deck(generated, df_cards)
+
+# --- Deck Generator Panel ---
+# If you know the commander color identity, pass it here; otherwise leave None
+commander_colors = None  # e.g., ['W','U','B','G'] for Atraxa
+render_deck_generator(filtered, commander_colors=commander_colors)

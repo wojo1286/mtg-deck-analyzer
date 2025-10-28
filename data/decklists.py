@@ -6,6 +6,8 @@
 # Adds deck_id to each row so downstream analytics can deduplicate by deck.
 
 from __future__ import annotations
+from data.scraping import BrowserManager, goto_with_backoff, wait_for_selector_with_backoff
+
 
 import asyncio
 from typing import List, Dict, Any
@@ -411,4 +413,115 @@ def fetch_decklists(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.DataFrame:
         st.warning("No cards were parsed from any deck.")
     else:
         st.success(f"✅ Parsed {len(df)} cards from {min(len(selected), max_decks)} decks.")
+    return df
+
+@st.cache_data(show_spinner=False)
+def fetch_decklists_shared(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.DataFrame:
+    """
+    Same output as fetch_decklists, but uses a single shared browser/context
+    for all deck URLs in this call (faster and nicer to EDHREC).
+    """
+    if deck_df is None or deck_df.empty or "deck_url" not in deck_df.columns:
+        st.warning("No deck metadata to scrape.")
+        return pd.DataFrame(columns=["deck_id", "deck_name", "deck_url", "name", "type", "cmc", "price", "qty"])
+
+    selected = deck_df.head(max_decks).copy()
+
+    async def _run() -> pd.DataFrame:
+        mgr = BrowserManager(headless=True)
+        rows: list[dict] = []
+        try:
+            await mgr.startup()
+            for idx, row in selected.iterrows():
+                deck_name = row.get("deck_name") or "View Decklist"
+                deck_url = row.get("deck_url")
+                if not deck_url:
+                    continue
+                st.info(f"Fetching decklist for: {deck_name}")
+                async with mgr.page() as page:
+                    # same interaction flow as your working version, but using goto_with_backoff
+                    await goto_with_backoff(page, deck_url)
+                    # switch to Table tab if needed
+                    for sel in [
+                        "button[data-rr-ui-event-key='table']",
+                        "button:has-text('Table')",
+                        "role=tab[name='Table']",
+                        "button[aria-controls='viewTabs-pane-table']",
+                    ]:
+                        try:
+                            if await page.is_visible(sel):
+                                await page.click(sel, timeout=5000)
+                                break
+                        except Exception:
+                            pass
+
+                    # table container (or <table> fallback)
+                    try:
+                        await wait_for_selector_with_backoff(page, 'div[class*="TableView_table"]', timeout_ms=10000)
+                    except Exception:
+                        await wait_for_selector_with_backoff(page, "table", timeout_ms=8000)
+
+                    # ensure Type column
+                    try:
+                        if not await page.is_visible('th:has-text("Type")'):
+                            for open_sel in ["button:has-text('Edit Columns')", "button[aria-label='Edit Columns']"]:
+                                try:
+                                    if await page.is_visible(open_sel):
+                                        await page.click(open_sel, timeout=5000)
+                                        break
+                                except Exception:
+                                    pass
+                            try:
+                                await page.wait_for_selector('div[class*="dropdown-menu"][class*="show"]', timeout=5000)
+                            except Exception:
+                                await page.wait_for_timeout(250)
+                            for sel in [
+                                'div[class*="dropdown-menu"][class*="show"] button:has-text("Type")',
+                                'div[class*="dropdown-menu"][class*="show"] [role="menuitem"]:has-text("Type")',
+                                'div[class*="dropdown-menu"][class*="show"] label:has-text("Type")',
+                                'label:has-text("Type")',
+                                'button:has-text("Type")',
+                            ]:
+                                try:
+                                    await page.click(sel, timeout=2000)
+                                    break
+                                except Exception:
+                                    pass
+                            try:
+                                await page.wait_for_selector('th:has-text("Type")', timeout=8000)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    # wait for rows (best-effort + gentle scroll)
+                    try:
+                        await page.wait_for_selector("table tbody tr td", timeout=12000)
+                    except Exception:
+                        try:
+                            await page.wait_for_selector("tr:has(td)", timeout=8000)
+                        except Exception:
+                            pass
+                    try:
+                        await page.evaluate("window.scrollBy(0, 600)")
+                        await page.wait_for_timeout(800)
+                    except Exception:
+                        pass
+
+                    html = await page.content()
+                    rows.extend(_parse_deck_html(html, deck_url, deck_name))
+            return pd.DataFrame(rows)
+        finally:
+            await mgr.shutdown()
+
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        df = loop.run_until_complete(_run())
+    else:
+        df = asyncio.run(_run())
+
+    if df.empty:
+        st.warning("No cards were parsed from any deck.")
+    else:
+        st.success(f"✅ Parsed {len(df)} cards from {min(len(selected), max_decks)} decks (shared browser).")
     return df
