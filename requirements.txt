@@ -9,3 +9,4 @@ playwright
 mlxtend
 scikit-learn
 st-gsheets-connection
+pyyaml
