@@ -1312,7 +1312,7 @@ def main():
                         new_type = col1.selectbox("Add card type:", options=available_types, key="new_type_select", index=None, placeholder="Choose a type...")
                         if col2.button("Add Type", key="add_type_btn") and new_type:
                             st.session_state.type_constraints[new_type] = (25, 35) if new_type == 'Creature' else (5, 15)
-                            # --- REMOVED st.experimental_rerun() ---
+                            # --- REMOVED st.rerun() ---
                     elif type_categories_list:
                          st.info("All available card types have been added.")
 
@@ -1324,7 +1324,7 @@ def main():
                              col1_disp.write(f"- **{ctype}**")
                              if col2_disp.button("Remove", key=f"del_type_{ctype}"):
                                  del st.session_state.type_constraints[ctype]
-                                 st.experimental_rerun() # Keep rerun for removal
+                                 st.rerun() # Keep rerun for removal
                     # Message moved below display loop for clarity
                     # else:
                     #      st.write("No card type constraints configured yet.") # Redundant if handled in form
@@ -1354,7 +1354,7 @@ def main():
                     # Pass the correct options list
                     st.session_state.selected_funcs_for_form = st.multiselect(
                         "Choose functions to set ranges for:",
-                        options=available_func_categories, # Use the list derived from active_func_categories
+                        options=available_func_categories, # <<< ENSURE THIS USES THE CORRECT LIST
                         default=st.session_state.selected_funcs_for_form,
                         key="func_selector_form"
                     )
@@ -1374,7 +1374,7 @@ def main():
                         with c2: min_val = st.number_input(f"{func} Min", 0, 40, new_range[0], key=f"num_min_func_{func}", label_visibility="collapsed")
                         with c3: max_val = st.number_input(f"{func} Max", 0, 40, new_range[1], key=f"num_max_func_{func}", label_visibility="collapsed")
                         if (min_val, max_val) != new_range:
-                             st.session_state.func_constraints[func] = (min_val, max_val); st.experimental_rerun()
+                             st.session_state.func_constraints[func] = (min_val, max_val); st.rerun()
 
                     # --- Loop 2: Type Constraints ---
                     st.write("**Set Card Type Constraint Ranges:**")
@@ -1390,7 +1390,7 @@ def main():
                         with c2: min_val = st.number_input(f"{ctype} Min", 0, 60, new_range[0], key=f"num_min_type_{ctype}", label_visibility="collapsed")
                         with c3: max_val = st.number_input(f"{ctype} Max", 0, 60, new_range[1], key=f"num_max_type_{ctype}", label_visibility="collapsed")
                         if (min_val, max_val) != new_range:
-                             st.session_state.type_constraints[ctype] = (min_val, max_val); st.experimental_rerun()
+                             st.session_state.type_constraints[ctype] = (min_val, max_val); st.rerun()
 
                     # --- Submit Button ---
                     submitted = st.form_submit_button("📋 Generate Deck With Constraints")
