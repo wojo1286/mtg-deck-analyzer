@@ -4,12 +4,7 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 
-from analysis.stats import (
-    inclusion_table,
-    mana_curve,
-    type_breakdown,
-    cooccurrence_matrix,
-)
+from analysis.stats import inclusion_table, mana_curve, type_breakdown, cooccurrence_matrix
 
 def render_parsed(df: pd.DataFrame):
     st.subheader("Parsed Cards")

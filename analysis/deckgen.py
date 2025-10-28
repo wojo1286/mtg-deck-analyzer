@@ -86,23 +86,39 @@ def prepare_candidates(
 ) -> pd.DataFrame:
     """
     Deduplicate by name, attach helper columns: category_list, cmc_filled,
-    and a composite score (popularity/efficiency) if possible.
+    and a composite score (popularity/efficiency). Safe if 'category' or
+    'price_clean' are missing.
     """
     must_exclude = set(must_exclude or [])
     must_include = set(must_include or [])
 
-    cols_needed = {"name", "type", "cmc", "price_clean", "category"}
-    missing = cols_needed - set(df.columns)
-    if missing:
-        raise ValueError(f"prepare_candidates: missing columns: {sorted(missing)}")
+    # Minimal hard requirements
+    cols_needed = {"name", "type", "cmc", "deck_id"}
+    missing_hard = cols_needed - set(df.columns)
+    if missing_hard:
+        raise ValueError(f"prepare_candidates: missing columns: {sorted(missing_hard)}")
 
     base = (
-        df[["name", "type", "cmc", "price_clean", "category", "deck_id"]]
+        df[["name", "type", "cmc", "deck_id"] + ([c for c in ["price_clean", "price", "category"] if c in df.columns])]
         .copy()
         .dropna(subset=["name"])
     )
 
-    # Popularity proxy = unique decks count per card.
+    # Ensure price_clean
+    if "price_clean" not in base.columns:
+        if "price" in base.columns:
+            base["price_clean"] = pd.to_numeric(
+                base["price"].astype(str).str.replace(r"[$,]", "", regex=True),
+                errors="coerce",
+            )
+        else:
+            base["price_clean"] = np.nan
+
+    # Ensure category (string, possibly empty)
+    if "category" not in base.columns:
+        base["category"] = ""
+
+    # Popularity proxy = unique decks per card
     if _HAS_INC_TABLE:
         pop = inclusion_table(base)[["name", "count"]].rename(columns={"count": "deck_count"})
     else:
@@ -113,6 +129,7 @@ def prepare_candidates(
             .sort_values("deck_count", ascending=False)
         )
 
+    # Keep the lowest-price row per card to give cheap options a nudge
     one_row = (
         base.sort_values(["name", "price_clean"], ascending=[True, True])
         .drop_duplicates(subset=["name"], keep="first")
@@ -121,26 +138,25 @@ def prepare_candidates(
     cand = one_row.merge(pop, on="name", how="left")
     cand["deck_count"] = cand["deck_count"].fillna(0).astype(float)
 
-    # Categories
-    cand["category_list"] = _split_categories(cand["category"])
+    # Split categories into list
+    cand["category_list"] = cand["category"].fillna("").astype(str).apply(lambda s: [t for t in s.split("|") if t])
 
     # CMC filled for efficiency
     med_cmc = pd.to_numeric(cand["cmc"], errors="coerce").median()
     cand["cmc_filled"] = pd.to_numeric(cand["cmc"], errors="coerce").fillna(med_cmc if pd.notna(med_cmc) else 3)
 
-    # Composite score:
-    # higher deck_count better; lower cmc better; mild price penalty (optional)
+    # Composite score: popularity up, cmc down, slight price penalty
     price = pd.to_numeric(cand["price_clean"], errors="coerce").fillna(0.0)
     cand["efficiency"] = cand["deck_count"] / (cand["cmc_filled"] + 1.0)
-    cand["score"] = cand["efficiency"] / (1.0 + (price / 50.0))  # soft price tilt
+    cand["score"] = cand["efficiency"] / (1.0 + (price / 50.0))
 
-    # Filter excludes; do not remove must_include (caller will seed list first)
+    # Excludes (must_include handled by the caller seeding initial list)
     cand = cand[~cand["name"].isin(must_exclude)].reset_index(drop=True)
 
-    # Deterministic ordering key (descending score, then by name)
+    # Deterministic order
     cand = cand.sort_values(["score", "name"], ascending=[False, True]).reset_index(drop=True)
-
     return cand
+
 
 
 # ---------------------------
@@ -209,7 +225,7 @@ def fill_deck_slots(
     initial: Iterable[str] | None = None,
     total_size: int = 100,
     prefer_nonlands_until: int | None = None,
-) -> List[str]:
+    List[str]:
     """
     Greedy selector that prioritizes meeting mins, respects maxes, and chooses
     highest-scoring candidates that *also* help unmet needs.
@@ -284,7 +300,7 @@ def generate_average_deck(
     *,
     total_size: int = 100,
     commander_colors: List[str] | None = None,
-) -> List[str]:
+    List[str]:
     """
     Builds an “average” shell:
     - mean counts per type across decks
