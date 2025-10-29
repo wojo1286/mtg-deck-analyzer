@@ -10,3 +10,5 @@ mlxtend
 scikit-learn
 st-gsheets-connection
 pyyaml
+gspread
+oauth2client
