@@ -10,21 +10,20 @@ This module now covers two layers:
 
 from __future__ import annotations
 
-import time
+import asyncio
 import random
-from typing import Callable, Awaitable, TypeVar
+from typing import AsyncIterator, Callable, Awaitable, TypeVar
 
+import nest_asyncio
 import pandas as pd
 import streamlit as st
+from playwright.sync_api import sync_playwright  # used by the sync metadata scraper
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-# Core Playwright setup hook
 from core.cache import ensure_playwright
 
-# ============================================================
-# SECTION A: Existing sync metadata scraping (kept as-is)
-# ============================================================
-from playwright.sync_api import sync_playwright
-
+# Apply AFTER imports, BEFORE any asyncio usage
+nest_asyncio.apply()
 
 @st.cache_resource
 def _get_browser():
@@ -129,18 +128,6 @@ def scrape_deck_metadata(
     st.success(f"✅ Found {len(df)} decks for {commander_slug}")
     return df
 
-
-# ============================================================
-# SECTION B: Async helpers for deckpreview scraping
-# (used by data/decklists.py)
-# ============================================================
-import asyncio
-import nest_asyncio
-from contextlib import asynccontextmanager
-
-nest_asyncio.apply()
-
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 T = TypeVar("T")
 

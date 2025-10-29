@@ -1,35 +1,19 @@
-# data/decklists.py
-# -----------------
-# Scrapes EDHREC deckpreview pages, switches to Table view, ensures "Type"
-# column is visible, then parses rows into a card dataframe.
-# Includes robust selector fallbacks + Streamlit-friendly async handling.
-# Adds deck_id to each row so downstream analytics can deduplicate by deck.
-
 from __future__ import annotations
-from data.scraping import (
-    BrowserManager,
-    goto_with_backoff,
-    wait_for_selector_with_backoff,
-)
-
 
 import asyncio
-from typing import List, Dict, Any
-from urllib.parse import urlparse
+import random
+import time
+from typing import List, Tuple
 
+import nest_asyncio
 import pandas as pd
 import streamlit as st
-from bs4 import BeautifulSoup
-
-# Allow nested async calls under Streamlit's running event loop
-import nest_asyncio
-
-nest_asyncio.apply()
-
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from core.cache import ensure_playwright
 from data.parsing import _extract_primary_type  # your existing helper
+
+nest_asyncio.apply()
 
 
 # ---------------------------------------------------------------------
