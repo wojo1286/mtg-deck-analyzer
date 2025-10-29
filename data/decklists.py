@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from typing import List
-
 import nest_asyncio
 import pandas as pd
 import streamlit as st
+
+
+from typing import List, Dict, Any
+from urllib.parse import urlparse
+
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from core.cache import ensure_playwright
-from data.parsing import _extract_primary_type  # your existing helper
+from data.parsing import _extract_primary_type
+from data.scraping import BrowserManager, goto_with_backoff, wait_for_selector_with_backoff
+from bs4 import BeautifulSoup
 
 nest_asyncio.apply()
-
 
 # ---------------------------------------------------------------------
 # Debug / behavior toggles (flip to True if you want step-by-step logs)

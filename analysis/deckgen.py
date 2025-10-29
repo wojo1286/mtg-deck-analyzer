@@ -4,11 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
 
-import numpy as np
 import pandas as pd
 
 try:
     from analysis.stats import inclusion_table
+
     _HAS_INC_TABLE = True
 except Exception:
     _HAS_INC_TABLE = False
@@ -19,16 +19,25 @@ class Range:
     min: int
     max: int
     cur: int = 0
-    def need(self) -> int: return max(0, self.min - self.cur)
-    def room(self) -> int: return max(0, self.max - self.cur)
-    def can_add(self) -> bool: return self.cur < self.max
-    def bump(self, k: int = 1) -> None: self.cur += k
+
+    def need(self) -> int:
+        return max(0, self.min - self.cur)
+
+    def room(self) -> int:
+        return max(0, self.max - self.cur)
+
+    def can_add(self) -> bool:
+        return self.cur < self.max
+
+    def bump(self, k: int = 1) -> None:
+        self.cur += k
 
 
 @dataclass
 class ConstraintState:
     types: Dict[str, Range]
     funcs: Dict[str, Range]
+
     def clone(self) -> "ConstraintState":
         return ConstraintState(
             types={k: Range(v.min, v.max, v.cur) for k, v in self.types.items()},
@@ -49,6 +58,7 @@ def _normalize_constraints(
                     high = low
                 out[k] = Range(low, high, 0)
         return out
+
     return ConstraintState(types=_norm(type_constraints), funcs=_norm(func_constraints))
 
 
@@ -60,6 +70,7 @@ def _split_categories(series: pd.Series) -> List[List[str]]:
 # ---------------------------
 # Candidate preparation
 # ---------------------------
+
 
 def prepare_candidates(
     df: pd.DataFrame,
@@ -100,9 +111,8 @@ def prepare_candidates(
             .sort_values("deck_count", ascending=False)
         )
 
-    one_row = (
-        base.sort_values(["name", "price_clean"], ascending=[True, True])
-        .drop_duplicates(subset=["name"], keep="first")
+    one_row = base.sort_values(["name", "price_clean"], ascending=[True, True]).drop_duplicates(
+        subset=["name"], keep="first"
     )
 
     cand = one_row.merge(pop, on="name", how="left")
@@ -127,9 +137,11 @@ def prepare_candidates(
     cand = cand.sort_values(["score", "name"], ascending=[False, True]).reset_index(drop=True)
     return cand
 
+
 # ---------------------------
 # Constraint-aware selection
 # ---------------------------
+
 
 def _apply_initials(state: ConstraintState, df: pd.DataFrame, initial_cards: Iterable[str]) -> None:
     initial = set(initial_cards or [])
@@ -194,8 +206,7 @@ def fill_deck_slots(
     total_size: int = 100,
     prefer_nonlands_until: int | None = None,
 ) -> List[str]:
-
-    """"
+    """ "
     Args:
         candidates: output of prepare_candidates()
         type_constraints / func_constraints: {key: (min, max)}
@@ -217,9 +228,20 @@ def fill_deck_slots(
 
     while len(deck) < total_size:
         # apply optional early non-land preference
-        if prefer_nonlands_until is not None and sum(
-            (1 for n in deck if candidates.loc[candidates["name"] == n, "type"].astype(str).str.contains("Land").any())
-        ) < 0:  # computed inline later; keep logic simple by soft-blocking in scoring
+        if (
+            prefer_nonlands_until is not None
+            and sum(
+                (
+                    1
+                    for n in deck
+                    if candidates.loc[candidates["name"] == n, "type"]
+                    .astype(str)
+                    .str.contains("Land")
+                    .any()
+                )
+            )
+            < 0
+        ):  # computed inline later; keep logic simple by soft-blocking in scoring
             pass
 
         # Evaluate need scores filtered to available candidates
@@ -232,7 +254,13 @@ def fill_deck_slots(
         pool = pool[pool.apply(lambda r: _card_fits(state, r), axis=1)]
         if prefer_nonlands_until is not None:
             nonlands_taken = sum(
-                (1 for n in deck if not str(candidates.loc[candidates["name"] == n, "type"].values[0]).startswith("Land"))
+                (
+                    1
+                    for n in deck
+                    if not str(
+                        candidates.loc[candidates["name"] == n, "type"].values[0]
+                    ).startswith("Land")
+                )
             )
             if nonlands_taken < prefer_nonlands_until:
                 pool = pool[~pool["type"].astype(str).str.startswith("Land")]
@@ -243,9 +271,8 @@ def fill_deck_slots(
         # Score: unmet-need first, then composite score as tiebreaker
         need = pool.apply(lambda r: _need_score(state, r), axis=1)
         # choose the best by (need_score, score) with deterministic name tiebreak
-        ranked = (
-            pool.assign(_need=need)
-            .sort_values(by=["_need", "score", "name"], ascending=[False, False, True])
+        ranked = pool.assign(_need=need).sort_values(
+            by=["_need", "score", "name"], ascending=[False, False, True]
         )
 
         pick = ranked.iloc[0]
@@ -256,9 +283,11 @@ def fill_deck_slots(
     # Trim in case of overshoot (shouldn't happen, but safe)
     return deck[:total_size]
 
+
 # ---------------------------
 # Average deck generation
 # ---------------------------
+
 
 def generate_average_deck(
     df: pd.DataFrame,

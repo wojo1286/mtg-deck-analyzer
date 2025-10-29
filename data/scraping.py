@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import random
 from typing import Callable, Awaitable, TypeVar
+import time
 
 import nest_asyncio
 import pandas as pd
@@ -21,6 +22,7 @@ from playwright.sync_api import sync_playwright  # used by the sync metadata scr
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from core.cache import ensure_playwright
+from contextlib import asynccontextmanager
 
 # Apply AFTER imports, BEFORE any asyncio usage
 nest_asyncio.apply()
