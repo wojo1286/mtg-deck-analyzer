@@ -195,7 +195,7 @@ def fill_deck_slots(
     prefer_nonlands_until: int | None = None,
 ) -> List[str]:
 
-
+    """"
     Args:
         candidates: output of prepare_candidates()
         type_constraints / func_constraints: {key: (min, max)}

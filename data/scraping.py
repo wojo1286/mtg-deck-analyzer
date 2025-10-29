@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import AsyncIterator, Callable, Awaitable, TypeVar
+from typing import Callable, Awaitable, TypeVar
 
 import nest_asyncio
 import pandas as pd
@@ -24,6 +24,7 @@ from core.cache import ensure_playwright
 
 # Apply AFTER imports, BEFORE any asyncio usage
 nest_asyncio.apply()
+
 
 @st.cache_resource
 def _get_browser():
