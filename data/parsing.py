@@ -5,7 +5,6 @@ Handles HTML table extraction and card type inference.
 
 from bs4 import BeautifulSoup
 import re
-import pandas as pd
 import streamlit as st
 from core.config import TYPE_KEYWORDS
 
@@ -39,12 +38,25 @@ def _extract_type_from_row(tr, tds, type_idx: int | None) -> str | None:
     Looks through typical table attributes and text patterns.
     """
     attribute_keys = {
-        "data-type-line", "data-typeline", "data-type", "data-card-type",
-        "data-cardtype", "data-card-types", "data-cardtypes", "data-type_line",
+        "data-type-line",
+        "data-typeline",
+        "data-type",
+        "data-card-type",
+        "data-cardtype",
+        "data-card-types",
+        "data-cardtypes",
+        "data-type_line",
     }
     type_hint_attrs = {
-        "data-title", "title", "aria-label", "data-tooltip", "data-tooltip-content",
-        "data-tooltip-title", "data-label", "data-th", "headers",
+        "data-title",
+        "title",
+        "aria-label",
+        "data-tooltip",
+        "data-tooltip-content",
+        "data-tooltip-title",
+        "data-label",
+        "data-th",
+        "headers",
     }
 
     candidate_texts: list[str] = []
@@ -156,7 +168,11 @@ def parse_table(html: str, deck_id: str, deck_source: str) -> list[dict]:
                 raw_type = tds[type_idx].get_text(strip=True)
             else:
                 raw_type = next(
-                    (td.get_text(strip=True) for td in tds if _extract_primary_type(td.get_text(strip=True))),
+                    (
+                        td.get_text(strip=True)
+                        for td in tds
+                        if _extract_primary_type(td.get_text(strip=True))
+                    ),
                     None,
                 )
             ctype = _extract_primary_type(raw_type)
@@ -166,19 +182,25 @@ def parse_table(html: str, deck_id: str, deck_source: str) -> list[dict]:
                 price = tds[price_idx].get_text(strip=True)
             else:
                 price = next(
-                    (td.get_text(strip=True) for td in reversed(tds) if td.get_text(strip=True).startswith("$")),
+                    (
+                        td.get_text(strip=True)
+                        for td in reversed(tds)
+                        if td.get_text(strip=True).startswith("$")
+                    ),
                     None,
                 )
 
             if name:
-                cards.append({
-                    "deck_id": deck_id,
-                    "deck_source": deck_source,
-                    "cmc": cmc,
-                    "name": name,
-                    "type": ctype,
-                    "price": price,
-                })
+                cards.append(
+                    {
+                        "deck_id": deck_id,
+                        "deck_source": deck_source,
+                        "cmc": cmc,
+                        "name": name,
+                        "type": ctype,
+                        "price": price,
+                    }
+                )
 
     if not cards:
         st.warning(f"No cards parsed from deck {deck_id}.")

@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+
 @st.cache_data(show_spinner=False)
 def clean_and_prepare_data(df: pd.DataFrame, categories_df: pd.DataFrame | None = None):
     if df is None or df.empty:
@@ -37,8 +38,8 @@ def clean_and_prepare_data(df: pd.DataFrame, categories_df: pd.DataFrame | None 
 
     pop_all = (
         work.groupby("name", as_index=False)
-            .agg(count=("deck_id","nunique"))
-            .sort_values("count", ascending=False)
+        .agg(count=("deck_id", "nunique"))
+        .sort_values("count", ascending=False)
     )
     if num_decks:
         pop_all["inclusion_rate"] = pop_all["count"] / num_decks * 100
@@ -49,7 +50,9 @@ def clean_and_prepare_data(df: pd.DataFrame, categories_df: pd.DataFrame | None 
 
 
 @st.cache_data(show_spinner=False)
-def calculate_average_stats(df: pd.DataFrame, num_decks: int, active_func_categories: list[str] | None = None):
+def calculate_average_stats(
+    df: pd.DataFrame, num_decks: int, active_func_categories: list[str] | None = None
+):
     if df is None or df.empty or not num_decks:
         return {}
 
@@ -57,9 +60,18 @@ def calculate_average_stats(df: pd.DataFrame, num_decks: int, active_func_catego
     d = df.copy()
 
     # Primary type mapping
-    primary_types = ["Creature","Instant","Sorcery","Artifact","Enchantment","Land","Planeswalker","Battle"]
-    d["primary_type"] = d["type"].astype(str).apply(
-        lambda x: next((t for t in primary_types if t in x), "Other")
+    primary_types = [
+        "Creature",
+        "Instant",
+        "Sorcery",
+        "Artifact",
+        "Enchantment",
+        "Land",
+        "Planeswalker",
+        "Battle",
+    ]
+    d["primary_type"] = (
+        d["type"].astype(str).apply(lambda x: next((t for t in primary_types if t in x), "Other"))
     )
 
     # CMC for spells
@@ -79,9 +91,11 @@ def calculate_average_stats(df: pd.DataFrame, num_decks: int, active_func_catego
     stats["avg_basic_lands"] = float(deck_known["inferred_basics"].mean())
 
     land_df = d[d["primary_type"] == "Land"]
-    basic_names = ["Plains","Island","Swamp","Mountain","Forest","Wastes"]
+    basic_names = ["Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"]
     non_basic_land_df = land_df[~land_df["name"].isin(basic_names)]
-    stats["avg_non_basic_lands"] = float(non_basic_land_df.groupby("deck_id").size().mean() if not non_basic_land_df.empty else 0)
+    stats["avg_non_basic_lands"] = float(
+        non_basic_land_df.groupby("deck_id").size().mean() if not non_basic_land_df.empty else 0
+    )
     stats["avg_total_lands"] = stats["avg_basic_lands"] + stats["avg_non_basic_lands"]
 
     # Functional category averages (if present)
@@ -92,15 +106,25 @@ def calculate_average_stats(df: pd.DataFrame, num_decks: int, active_func_catego
         cats = cats[(cats["category_list"] != "") & (cats["category_list"] != "Uncategorized")]
         per_deck = cats.groupby("deck_id")["category_list"].value_counts().unstack(fill_value=0)
         avg_cat = per_deck.mean()
-        stats["avg_functional_counts"] = {c: float(avg_cat.get(c, 0)) for c in active_func_categories}
+        stats["avg_functional_counts"] = {
+            c: float(avg_cat.get(c, 0)) for c in active_func_categories
+        }
 
     # Deck prices
     if "price_clean" in d.columns:
         deck_total_prices = d.groupby("deck_id")["price_clean"].sum()
-        stats["avg_deck_price"] = float(deck_total_prices.mean() if not deck_total_prices.empty else 0)
-        stats["median_deck_price"] = float(deck_total_prices.median() if not deck_total_prices.empty else 0)
-        stats["min_deck_price"] = float(deck_total_prices.min() if not deck_total_prices.empty else 0)
-        stats["max_deck_price"] = float(deck_total_prices.max() if not deck_total_prices.empty else 0)
+        stats["avg_deck_price"] = float(
+            deck_total_prices.mean() if not deck_total_prices.empty else 0
+        )
+        stats["median_deck_price"] = float(
+            deck_total_prices.median() if not deck_total_prices.empty else 0
+        )
+        stats["min_deck_price"] = float(
+            deck_total_prices.min() if not deck_total_prices.empty else 0
+        )
+        stats["max_deck_price"] = float(
+            deck_total_prices.max() if not deck_total_prices.empty else 0
+        )
 
     # CMC distribution
     cmc_dist = cmc_valid.value_counts().sort_index()

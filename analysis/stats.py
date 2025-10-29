@@ -6,13 +6,16 @@ import streamlit as st
 
 # ---------- Utilities ----------
 
+
 def _ensure_cols(df: pd.DataFrame, cols: list[str]) -> bool:
     if df is None or df.empty:
         return False
     missing = [c for c in cols if c not in df.columns]
     return len(missing) == 0
 
+
 # ---------- Budget filter ----------
+
 
 @st.cache_data(show_spinner=False)
 def budget_filtered(df: pd.DataFrame, cap: float | None) -> pd.DataFrame:
@@ -22,15 +25,15 @@ def budget_filtered(df: pd.DataFrame, cap: float | None) -> pd.DataFrame:
     if "price" not in df.columns:
         return df.copy()
     out = df.copy()
-    out["price_clean"] = (
-        pd.to_numeric(
-            out["price"].astype(str).str.replace(r"[$,]", "", regex=True),
-            errors="coerce",
-        )
+    out["price_clean"] = pd.to_numeric(
+        out["price"].astype(str).str.replace(r"[$,]", "", regex=True),
+        errors="coerce",
     )
     return out[(out["price_clean"].isna()) | (out["price_clean"] <= cap)]
 
+
 # ---------- Popularity / inclusion ----------
+
 
 @st.cache_data(show_spinner=False)
 def inclusion_table(
@@ -45,7 +48,9 @@ def inclusion_table(
       avg_price, avg_cmc, type
     """
     if not _ensure_cols(df, ["deck_id", "name"]):
-        return pd.DataFrame(columns=["name","count","inclusion_rate","avg_price","avg_cmc","type"])
+        return pd.DataFrame(
+            columns=["name", "count", "inclusion_rate", "avg_price", "avg_cmc", "type"]
+        )
 
     work = df.copy()
 
@@ -74,13 +79,13 @@ def inclusion_table(
     # --- Aggregate popularity & averages ---
     pop = (
         work.groupby(["name"], as_index=False)
-            .agg(
-                count=("deck_id", "nunique"),
-                avg_price=("price_num", "mean"),
-                avg_cmc=("cmc_num", "mean"),
-                type=("type", "first"),
-            )
-            .sort_values("count", ascending=False)
+        .agg(
+            count=("deck_id", "nunique"),
+            avg_price=("price_num", "mean"),
+            avg_cmc=("cmc_num", "mean"),
+            type=("type", "first"),
+        )
+        .sort_values("count", ascending=False)
     )
 
     # Drop top N staples if requested
@@ -97,28 +102,34 @@ def inclusion_table(
 
     return pop.reset_index(drop=True)
 
+
 # ---------- Mana curve (spells only) ----------
+
 
 @st.cache_data(show_spinner=False)
 def mana_curve(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "cmc" not in df.columns or "type" not in df.columns:
-        return pd.DataFrame(columns=["cmc","count"])
+        return pd.DataFrame(columns=["cmc", "count"])
     spells = df[~df["type"].astype(str).str.contains("Land", na=False)].copy()
     spells["cmc"] = pd.to_numeric(spells["cmc"], errors="coerce")
     spells = spells.dropna(subset=["cmc"])
     return spells.groupby("cmc").size().reset_index(name="count").sort_values("cmc")
 
+
 # ---------- Type breakdown (average per deck) ----------
+
 
 @st.cache_data(show_spinner=False)
 def type_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     if not _ensure_cols(df, ["deck_id", "type"]):
-        return pd.DataFrame(columns=["type","avg_count_per_deck"])
-    per_deck = df.groupby(["deck_id","type"]).size().reset_index(name="n")
+        return pd.DataFrame(columns=["type", "avg_count_per_deck"])
+    per_deck = df.groupby(["deck_id", "type"]).size().reset_index(name="n")
     avg = per_deck.groupby("type")["n"].mean().reset_index(name="avg_count_per_deck")
     return avg.sort_values("avg_count_per_deck", ascending=False)
 
+
 # ---------- Co-occurrence (top N by inclusion) ----------
+
 
 @st.cache_data(show_spinner=False)
 def cooccurrence_matrix(
@@ -126,7 +137,7 @@ def cooccurrence_matrix(
     *,
     top_n: int = 40,
     min_decks: int = 2,
-    normalize: bool = False,      # False = raw counts; True = Jaccard similarity
+    normalize: bool = False,  # False = raw counts; True = Jaccard similarity
     zero_diagonal: bool = True,
 ) -> pd.DataFrame:
     """
@@ -186,7 +197,7 @@ def cooccurrence_matrix(
     if normalize:
         # Jaccard similarity: |A∩B| / |A∪B| with |A| = diag
         diag = np.diag(M.values).astype(float)
-        denom = (diag[:, None] + diag[None, :] - M.values)
+        denom = diag[:, None] + diag[None, :] - M.values
         with np.errstate(divide="ignore", invalid="ignore"):
             J = np.where(denom > 0, M.values / denom, 0.0)
         M = pd.DataFrame(J, index=order, columns=order)

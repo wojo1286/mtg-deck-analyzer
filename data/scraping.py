@@ -58,7 +58,9 @@ def _fetch_html(url: str, wait_selector: str = "table", retries: int = 3) -> str
 
 
 @st.cache_data(show_spinner=False)
-def scrape_deck_metadata(commander_slug: str, bracket: str = "all", budget: str = "all") -> pd.DataFrame:
+def scrape_deck_metadata(
+    commander_slug: str, bracket: str = "all", budget: str = "all"
+) -> pd.DataFrame:
     """
     Scrapes the /decks/<commander> page to extract deck URLs and metadata (sync API).
 
@@ -72,9 +74,20 @@ def scrape_deck_metadata(commander_slug: str, bracket: str = "all", budget: str 
     html = _fetch_html(url, wait_selector="table")
 
     if not html:
-        return pd.DataFrame(columns=["deck_name", "deck_url", "bracket", "budget", "uploaded", "likes", "comments"])
+        return pd.DataFrame(
+            columns=[
+                "deck_name",
+                "deck_url",
+                "bracket",
+                "budget",
+                "uploaded",
+                "likes",
+                "comments",
+            ]
+        )
 
     from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html, "html.parser")
 
     decks = []
@@ -100,15 +113,17 @@ def scrape_deck_metadata(commander_slug: str, bracket: str = "all", budget: str 
         if "comments" in stats_text:
             comments = stats_text.split("comments")[0].strip().split()[-1]
 
-        decks.append({
-            "deck_name": deck_name,
-            "deck_url": deck_url,
-            "bracket": bracket,
-            "budget": budget,
-            "uploaded": uploaded,
-            "likes": likes,
-            "comments": comments
-        })
+        decks.append(
+            {
+                "deck_name": deck_name,
+                "deck_url": deck_url,
+                "bracket": bracket,
+                "budget": budget,
+                "uploaded": uploaded,
+                "likes": likes,
+                "comments": comments,
+            }
+        )
 
     df = pd.DataFrame(decks)
     st.success(f"✅ Found {len(df)} decks for {commander_slug}")
@@ -167,6 +182,7 @@ class BrowserManager:
             async with mgr.page() as page:
                 await page.goto(...)
     """
+
     def __init__(self, headless: bool = True):
         self._headless = headless
         self._playwright = None
@@ -223,10 +239,12 @@ class BrowserManager:
 async def goto_with_backoff(page, url: str, *, timeout_ms: int = 90000):
     async def _go():
         return await page.goto(url, timeout=timeout_ms)
+
     return await backoff(_go)
 
 
 async def wait_for_selector_with_backoff(page, selector: str, *, timeout_ms: int = 10000):
     async def _wait():
         return await page.wait_for_selector(selector, timeout=timeout_ms)
+
     return await backoff(_wait)

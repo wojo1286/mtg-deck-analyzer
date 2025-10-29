@@ -6,7 +6,11 @@
 # Adds deck_id to each row so downstream analytics can deduplicate by deck.
 
 from __future__ import annotations
-from data.scraping import BrowserManager, goto_with_backoff, wait_for_selector_with_backoff
+from data.scraping import (
+    BrowserManager,
+    goto_with_backoff,
+    wait_for_selector_with_backoff,
+)
 
 
 import asyncio
@@ -19,6 +23,7 @@ from bs4 import BeautifulSoup
 
 # Allow nested async calls under Streamlit's running event loop
 import nest_asyncio
+
 nest_asyncio.apply()
 
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
@@ -30,10 +35,10 @@ from data.parsing import _extract_primary_type  # your existing helper
 # ---------------------------------------------------------------------
 # Debug / behavior toggles (flip to True if you want step-by-step logs)
 # ---------------------------------------------------------------------
-DEBUG_SHOW_STEPS = False         # stream step-by-step actions
-DEBUG_HTML_SNAPSHOT = False      # show HTML slice for the FIRST deck
+DEBUG_SHOW_STEPS = False  # stream step-by-step actions
+DEBUG_HTML_SNAPSHOT = False  # show HTML slice for the FIRST deck
 DEBUG_HTML_SLICE_LEN = 6000
-SCROLL_AFTER_ROWS = True         # scroll to coax virtualized rows
+SCROLL_AFTER_ROWS = True  # scroll to coax virtualized rows
 SCROLL_PIXELS = 600
 SCROLL_WAIT_MS = 800
 
@@ -99,7 +104,10 @@ async def _ensure_type_column(page) -> None:
             return
 
         # Open the menu
-        for open_sel in ["button:has-text('Edit Columns')", "button[aria-label='Edit Columns']"]:
+        for open_sel in [
+            "button:has-text('Edit Columns')",
+            "button[aria-label='Edit Columns']",
+        ]:
             try:
                 if await page.is_visible(open_sel):
                     if DEBUG_SHOW_STEPS:
@@ -184,7 +192,9 @@ async def _fetch_deck_html_async(url: str) -> str | None:
     """Fetch deck HTML using the interaction flow your original app used, with fallbacks."""
     ensure_playwright()
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        browser = await p.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
         context = await browser.new_context(ignore_https_errors=True)
         page = await context.new_page()
 
@@ -304,16 +314,18 @@ def _parse_deck_html(deck_html: str, deck_url: str, deck_name: str) -> List[Dict
                 if not qty:
                     qty = "1"
 
-                cards.append({
-                    "deck_id": deck_id,                      # <-- unique deck key
-                    "deck_name": deck_name or "View Decklist",
-                    "deck_url": deck_url,
-                    "name": name,
-                    "type": ctype or "Unknown",
-                    "cmc": cmc,
-                    "price": price,
-                    "qty": qty,
-                })
+                cards.append(
+                    {
+                        "deck_id": deck_id,  # <-- unique deck key
+                        "deck_name": deck_name or "View Decklist",
+                        "deck_url": deck_url,
+                        "name": name,
+                        "type": ctype or "Unknown",
+                        "cmc": cmc,
+                        "price": price,
+                        "qty": qty,
+                    }
+                )
 
         if cards:
             return cards  # success via table path
@@ -349,16 +361,18 @@ def _parse_deck_html(deck_html: str, deck_url: str, deck_name: str) -> List[Dict
                 if price is None and txt.startswith("$"):
                     price = txt
 
-            cards.append({
-                "deck_id": deck_id,                      # <-- unique deck key
-                "deck_name": deck_name or "View Decklist",
-                "deck_url": deck_url,
-                "name": name,
-                "type": ctype or "Unknown",
-                "cmc": cmc,
-                "price": price,
-                "qty": "1",
-            })
+            cards.append(
+                {
+                    "deck_id": deck_id,  # <-- unique deck key
+                    "deck_name": deck_name or "View Decklist",
+                    "deck_url": deck_url,
+                    "name": name,
+                    "type": ctype or "Unknown",
+                    "cmc": cmc,
+                    "price": price,
+                    "qty": "1",
+                }
+            )
 
     return cards
 
@@ -381,7 +395,18 @@ def fetch_decklists(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.DataFrame:
     """
     if deck_df is None or deck_df.empty or "deck_url" not in deck_df.columns:
         st.warning("No deck metadata to scrape.")
-        return pd.DataFrame(columns=["deck_id", "deck_name", "deck_url", "name", "type", "cmc", "price", "qty"])
+        return pd.DataFrame(
+            columns=[
+                "deck_id",
+                "deck_name",
+                "deck_url",
+                "name",
+                "type",
+                "cmc",
+                "price",
+                "qty",
+            ]
+        )
 
     all_cards: List[Dict[str, Any]] = []
     selected = deck_df.head(max_decks).copy()
@@ -415,6 +440,7 @@ def fetch_decklists(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.DataFrame:
         st.success(f"✅ Parsed {len(df)} cards from {min(len(selected), max_decks)} decks.")
     return df
 
+
 @st.cache_data(show_spinner=False)
 def fetch_decklists_shared(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.DataFrame:
     """
@@ -423,7 +449,18 @@ def fetch_decklists_shared(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.Dat
     """
     if deck_df is None or deck_df.empty or "deck_url" not in deck_df.columns:
         st.warning("No deck metadata to scrape.")
-        return pd.DataFrame(columns=["deck_id", "deck_name", "deck_url", "name", "type", "cmc", "price", "qty"])
+        return pd.DataFrame(
+            columns=[
+                "deck_id",
+                "deck_name",
+                "deck_url",
+                "name",
+                "type",
+                "cmc",
+                "price",
+                "qty",
+            ]
+        )
 
     selected = deck_df.head(max_decks).copy()
 
@@ -457,14 +494,19 @@ def fetch_decklists_shared(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.Dat
 
                     # table container (or <table> fallback)
                     try:
-                        await wait_for_selector_with_backoff(page, 'div[class*="TableView_table"]', timeout_ms=10000)
+                        await wait_for_selector_with_backoff(
+                            page, 'div[class*="TableView_table"]', timeout_ms=10000
+                        )
                     except Exception:
                         await wait_for_selector_with_backoff(page, "table", timeout_ms=8000)
 
                     # ensure Type column
                     try:
                         if not await page.is_visible('th:has-text("Type")'):
-                            for open_sel in ["button:has-text('Edit Columns')", "button[aria-label='Edit Columns']"]:
+                            for open_sel in [
+                                "button:has-text('Edit Columns')",
+                                "button[aria-label='Edit Columns']",
+                            ]:
                                 try:
                                     if await page.is_visible(open_sel):
                                         await page.click(open_sel, timeout=5000)
@@ -472,7 +514,10 @@ def fetch_decklists_shared(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.Dat
                                 except Exception:
                                     pass
                             try:
-                                await page.wait_for_selector('div[class*="dropdown-menu"][class*="show"]', timeout=5000)
+                                await page.wait_for_selector(
+                                    'div[class*="dropdown-menu"][class*="show"]',
+                                    timeout=5000,
+                                )
                             except Exception:
                                 await page.wait_for_timeout(250)
                             for sel in [
@@ -523,5 +568,7 @@ def fetch_decklists_shared(deck_df: pd.DataFrame, max_decks: int = 10) -> pd.Dat
     if df.empty:
         st.warning("No cards were parsed from any deck.")
     else:
-        st.success(f"✅ Parsed {len(df)} cards from {min(len(selected), max_decks)} decks (shared browser).")
+        st.success(
+            f"✅ Parsed {len(df)} cards from {min(len(selected), max_decks)} decks (shared browser)."
+        )
     return df

@@ -3,7 +3,7 @@ import streamlit as st
 
 from data.scraping import scrape_deck_metadata
 from data.decklists import fetch_decklists_shared
-from data.cleaning import clean_and_prepare_data   # ✅ NEW
+from data.cleaning import clean_and_prepare_data  # ✅ NEW
 
 from ui.dashboard import (
     render_parsed,
@@ -19,7 +19,6 @@ from analysis.stats import budget_filtered
 from analysis.deckgen import (
     prepare_candidates,
     fill_deck_slots,
-    generate_average_deck,
     summarize_deck,
 )
 
@@ -29,8 +28,11 @@ st.title("MTG Deckbuilding Analysis Tool - Modular Version")
 # --- Sidebar controls ---
 with st.sidebar:
     st.header("Data Source")
-    commander = st.text_input("Commander slug (EDHREC)", value="atraxa-praetors-voice",
-                              help="Example: 'ojer-axonil-deepest-might'")
+    commander = st.text_input(
+        "Commander slug (EDHREC)",
+        value="atraxa-praetors-voice",
+        help="Example: 'ojer-axonil-deepest-might'",
+    )
     deck_limit = st.slider("How many decks to scrape", min_value=1, max_value=50, value=3, step=1)
 
     st.divider()
@@ -66,7 +68,9 @@ if df_decks is None or df_decks.empty:
 with st.spinner(f"Scraping up to {deck_limit} decks and parsing card tables..."):
     df_cards_raw = fetch_decklists_shared(df_decks, max_decks=deck_limit)
 if df_cards_raw is None or df_cards_raw.empty:
-    st.warning("No cards were parsed from any deck. Try a different commander or increase the number of decks.")
+    st.warning(
+        "No cards were parsed from any deck. Try a different commander or increase the number of decks."
+    )
     st.stop()
 
 # ✅ NEW: one-time cleaning/normalization so downstream has price_clean/cmc/category
@@ -86,8 +90,13 @@ with st.expander("Advanced Filters", expanded=False):
 
 # --- Render sections ---
 render_parsed(filtered)
-render_popularity(filtered, top_n=25, price_cap=cap,
-                  exclude_types=exclude_types, exclude_top_n=exclude_top_n)
+render_popularity(
+    filtered,
+    top_n=25,
+    price_cap=cap,
+    exclude_types=exclude_types,
+    exclude_top_n=exclude_top_n,
+)
 render_curve(filtered)
 render_types(filtered)
 
@@ -106,9 +115,9 @@ generated = fill_deck_slots(
     cands,
     type_constraints=type_constraints,
     func_constraints=func_constraints,
-    initial=[],               # your must-haves list
+    initial=[],  # your must-haves list
     total_size=100,
-    prefer_nonlands_until=60
+    prefer_nonlands_until=60,
 )
 
 summary = summarize_deck(generated, df_cards)  # use cleaned data for enrichment

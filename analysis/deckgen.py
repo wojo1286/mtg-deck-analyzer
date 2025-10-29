@@ -1,3 +1,4 @@
+# analysis/deckgen.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,8 +7,6 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
-# We’ll reuse your popularity computation from analysis.stats if available.
-# If you prefer not to import, you can inline a simple popularity table function.
 try:
     from analysis.stats import inclusion_table
     _HAS_INC_TABLE = True
@@ -15,36 +14,21 @@ except Exception:
     _HAS_INC_TABLE = False
 
 
-# ---------------------------
-# Helpers / data structures
-# ---------------------------
-
 @dataclass
 class Range:
     min: int
     max: int
     cur: int = 0
-
-    def need(self) -> int:
-        """How many to reach min (>=0)."""
-        return max(0, self.min - self.cur)
-
-    def room(self) -> int:
-        """How many until max (>=0)."""
-        return max(0, self.max - self.cur)
-
-    def can_add(self) -> bool:
-        return self.cur < self.max
-
-    def bump(self, k: int = 1) -> None:
-        self.cur += k
+    def need(self) -> int: return max(0, self.min - self.cur)
+    def room(self) -> int: return max(0, self.max - self.cur)
+    def can_add(self) -> bool: return self.cur < self.max
+    def bump(self, k: int = 1) -> None: self.cur += k
 
 
 @dataclass
 class ConstraintState:
     types: Dict[str, Range]
     funcs: Dict[str, Range]
-
     def clone(self) -> "ConstraintState":
         return ConstraintState(
             types={k: Range(v.min, v.max, v.cur) for k, v in self.types.items()},
@@ -65,12 +49,10 @@ def _normalize_constraints(
                     high = low
                 out[k] = Range(low, high, 0)
         return out
-
     return ConstraintState(types=_norm(type_constraints), funcs=_norm(func_constraints))
 
 
 def _split_categories(series: pd.Series) -> List[List[str]]:
-    """Split pipe-separated categories into lists; empty -> []."""
     vals = series.fillna("").astype(str).tolist()
     return [v.split("|") if v else [] for v in vals]
 
@@ -86,39 +68,28 @@ def prepare_candidates(
 ) -> pd.DataFrame:
     """
     Deduplicate by name, attach helper columns: category_list, cmc_filled,
-    and a composite score (popularity/efficiency). Safe if 'category' or
-    'price_clean' are missing.
+    and a composite score (popularity/efficiency).
+    NOTE: 'category' is optional; if missing we treat it as empty.
     """
     must_exclude = set(must_exclude or [])
     must_include = set(must_include or [])
 
-    # Minimal hard requirements
-    cols_needed = {"name", "type", "cmc", "deck_id"}
-    missing_hard = cols_needed - set(df.columns)
-    if missing_hard:
-        raise ValueError(f"prepare_candidates: missing columns: {sorted(missing_hard)}")
+    cols_needed = {"name", "type", "cmc", "price_clean"}  # 'category' optional now
+    missing = cols_needed - set(df.columns)
+    if missing:
+        raise ValueError(f"prepare_candidates: missing columns: {sorted(missing)}")
+
+    work = df.copy()
+    if "category" not in work.columns:
+        work["category"] = ""  # ensure downstream code works
 
     base = (
-        df[["name", "type", "cmc", "deck_id"] + ([c for c in ["price_clean", "price", "category"] if c in df.columns])]
+        work[["name", "type", "cmc", "price_clean", "category", "deck_id"]]
         .copy()
         .dropna(subset=["name"])
     )
 
-    # Ensure price_clean
-    if "price_clean" not in base.columns:
-        if "price" in base.columns:
-            base["price_clean"] = pd.to_numeric(
-                base["price"].astype(str).str.replace(r"[$,]", "", regex=True),
-                errors="coerce",
-            )
-        else:
-            base["price_clean"] = np.nan
-
-    # Ensure category (string, possibly empty)
-    if "category" not in base.columns:
-        base["category"] = ""
-
-    # Popularity proxy = unique decks per card
+    # Popularity proxy = unique decks count per card.
     if _HAS_INC_TABLE:
         pop = inclusion_table(base)[["name", "count"]].rename(columns={"count": "deck_count"})
     else:
@@ -129,7 +100,6 @@ def prepare_candidates(
             .sort_values("deck_count", ascending=False)
         )
 
-    # Keep the lowest-price row per card to give cheap options a nudge
     one_row = (
         base.sort_values(["name", "price_clean"], ascending=[True, True])
         .drop_duplicates(subset=["name"], keep="first")
@@ -138,26 +108,24 @@ def prepare_candidates(
     cand = one_row.merge(pop, on="name", how="left")
     cand["deck_count"] = cand["deck_count"].fillna(0).astype(float)
 
-    # Split categories into list
-    cand["category_list"] = cand["category"].fillna("").astype(str).apply(lambda s: [t for t in s.split("|") if t])
+    # Categories
+    cand["category_list"] = _split_categories(cand["category"])
 
     # CMC filled for efficiency
     med_cmc = pd.to_numeric(cand["cmc"], errors="coerce").median()
-    cand["cmc_filled"] = pd.to_numeric(cand["cmc"], errors="coerce").fillna(med_cmc if pd.notna(med_cmc) else 3)
+    cand["cmc_filled"] = pd.to_numeric(cand["cmc"], errors="coerce").fillna(
+        med_cmc if pd.notna(med_cmc) else 3
+    )
 
-    # Composite score: popularity up, cmc down, slight price penalty
+    # Composite score: popularity vs efficiency with a soft price tilt
     price = pd.to_numeric(cand["price_clean"], errors="coerce").fillna(0.0)
     cand["efficiency"] = cand["deck_count"] / (cand["cmc_filled"] + 1.0)
     cand["score"] = cand["efficiency"] / (1.0 + (price / 50.0))
 
-    # Excludes (must_include handled by the caller seeding initial list)
+    # Filter excludes; keep must_include (caller seeds deck before selection)
     cand = cand[~cand["name"].isin(must_exclude)].reset_index(drop=True)
-
-    # Deterministic order
     cand = cand.sort_values(["score", "name"], ascending=[False, True]).reset_index(drop=True)
     return cand
-
-
 
 # ---------------------------
 # Constraint-aware selection
@@ -225,10 +193,8 @@ def fill_deck_slots(
     initial: Iterable[str] | None = None,
     total_size: int = 100,
     prefer_nonlands_until: int | None = None,
-    List[str]:
-    """
-    Greedy selector that prioritizes meeting mins, respects maxes, and chooses
-    highest-scoring candidates that *also* help unmet needs.
+) -> List[str]:
+
 
     Args:
         candidates: output of prepare_candidates()
@@ -290,7 +256,6 @@ def fill_deck_slots(
     # Trim in case of overshoot (shouldn't happen, but safe)
     return deck[:total_size]
 
-
 # ---------------------------
 # Average deck generation
 # ---------------------------
@@ -300,7 +265,7 @@ def generate_average_deck(
     *,
     total_size: int = 100,
     commander_colors: List[str] | None = None,
-    List[str]:
+) -> List[str]:
     """
     Builds an “average” shell:
     - mean counts per type across decks
@@ -311,57 +276,45 @@ def generate_average_deck(
     if df is None or df.empty:
         return []
 
-    # Basic setup
     basic_land_names = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
 
-    # Known cards per deck
     per_deck_counts = df.groupby("deck_id").size()
-    # Estimate basics as the remainder (won’t be perfect, but gives useful averages)
     basics_inferred = (total_size - per_deck_counts).clip(lower=0)
 
-    # Types per deck
     types_per_deck = (
         df.assign(primary_type=df["type"].astype(str))
-          .groupby(["deck_id", "primary_type"])
-          .size()
-          .unstack(fill_value=0)
+        .groupby(["deck_id", "primary_type"])
+        .size()
+        .unstack(fill_value=0)
     )
     avg_types = types_per_deck.mean().sort_values(ascending=False)
 
-    # Non-basic lands average
     land_df = df[df["type"].astype(str).str.contains("Land", na=False)]
     non_basic_land_df = land_df[~land_df["name"].isin(basic_land_names)]
-    avg_non_basics = non_basic_land_df.groupby("deck_id").size().mean() if not non_basic_land_df.empty else 0.0
+    avg_non_basics = (
+        non_basic_land_df.groupby("deck_id").size().mean() if not non_basic_land_df.empty else 0.0
+    )
 
-    # Average basics (inferred)
     avg_basics = basics_inferred.mean() if not basics_inferred.empty else 0.0
 
-    # Turn into integer template summing to (total_size - commander slot if you want; here we just do total_size)
     template = avg_types.copy()
-
-    # Move Land to (non-basic + basics)
     template["Non-Basic Land"] = round(avg_non_basics)
     template["Basic Land"] = round(avg_basics)
     if "Land" in template:
         template = template.drop(labels=["Land"])
 
-    # Normalize to (total_size - 0). We target 99 spells + 1 commander in EDH usually; keep 100 here, caller can adjust.
     tgt = total_size
-    s = int(round(template.sum()))
-    if s <= 0:
+    if int(round(template.sum())) <= 0:
         return []
 
-    scaled = (template / template.sum() * (tgt)).round().astype(int)
-    # Fix rounding drift
+    scaled = (template / template.sum() * tgt).round().astype(int)
     drift = tgt - int(scaled.sum())
     if drift != 0 and not scaled.empty:
         scaled.iloc[0] += drift
 
-    # Build deck by picking top-N popular for each type bucket
     names_used: set[str] = set()
     deck: List[str] = []
 
-    # Popularity table on spells only
     spells = df[~df["type"].astype(str).str.contains("Land", na=False)]
     if _HAS_INC_TABLE:
         pop = inclusion_table(spells)[["name", "count"]].rename(columns={"count": "deck_count"})
@@ -369,7 +322,6 @@ def generate_average_deck(
         pop = spells.groupby("name")["deck_id"].nunique().reset_index(name="deck_count")
     pop = pop.sort_values(["deck_count", "name"], ascending=[False, True])
 
-    # Helper to pull top cards for a predicate until quota reached
     def _pull(predicate, n: int):
         nonlocal deck, names_used
         if n <= 0:
@@ -388,21 +340,14 @@ def generate_average_deck(
                 continue
             deck.append(nm)
             names_used.add(nm)
-            if len(deck) >= len(names_used) and len(deck) % max(n, 1) == 0:
-                # not a precise stop, but we exit after filling each bucket outer scope
-                pass
             if len([x for x in deck if predicate(spells[spells["name"] == x])]) >= n:
                 break
 
-    # Fill by primary types (excluding lands)
     for t, n in scaled.items():
-        if n <= 0:
-            continue
-        if "Land" in t:
+        if n <= 0 or "Land" in t:
             continue
         _pull(lambda df_: df_["type"].astype(str).eq(t), int(n))
 
-    # Non-basics
     num_nb = int(scaled.get("Non-Basic Land", 0))
     if num_nb > 0 and not non_basic_land_df.empty:
         nb_pop = (
@@ -421,21 +366,15 @@ def generate_average_deck(
             names_used.add(nm)
             num_nb -= 1
 
-    # Basics by color identity
     num_basic = int(scaled.get("Basic Land", 0))
     if num_basic > 0:
         color_map = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
-        basics = [color_map[c] for c in (commander_colors or []) if c in color_map]
-        if not basics:
-            basics = ["Wastes"]
-        # even split w/ remainder
+        basics = [color_map[c] for c in (commander_colors or []) if c in color_map] or ["Wastes"]
         q, r = divmod(num_basic, len(basics))
         for i, b in enumerate(basics):
             deck.extend([b] * (q + (1 if i < r else 0)))
 
-    # Backfill if short
     if len(deck) < tgt:
-        # any remaining popular spells
         for _, r in pop.iterrows():
             if len(deck) >= tgt:
                 break
@@ -446,85 +385,3 @@ def generate_average_deck(
             names_used.add(nm)
 
     return deck[:tgt]
-
-
-# ---------------------------
-# Deck summary
-# ---------------------------
-
-def summarize_deck(
-    decklist: List[str],
-    ref_df: pd.DataFrame,
-    total_size: int = 100,
-) -> Dict[str, pd.DataFrame | float | int | Dict]:
-    """
-    Summarize a generated deck using card info from ref_df.
-
-    Returns dict with:
-      - counts_by_type (DataFrame)
-      - cmc_curve (DataFrame)
-      - price_total (float)
-      - basics / non_basics (ints)
-      - functions_covered (DataFrame)
-    """
-    if not decklist or ref_df is None or ref_df.empty:
-        return {}
-
-    cards = pd.DataFrame({"name": decklist})
-    info = (
-        cards.merge(
-            ref_df[["name", "type", "cmc", "price_clean", "category"]].drop_duplicates("name"),
-            on="name",
-            how="left",
-        )
-    )
-
-    # Types
-    counts_by_type = (
-        info["type"].fillna("Unknown").astype(str).value_counts().reset_index()
-        .rename(columns={"index": "type", "type": "count"})
-    )
-
-    # CMC curve (non-lands)
-    curve = (
-        info[~info["type"].astype(str).str.contains("Land", na=False)]
-        .assign(cmc_num=pd.to_numeric(info["cmc"], errors="coerce").fillna(0).astype(int))
-        .groupby("cmc_num")
-        .size()
-        .reset_index(name="count")
-        .rename(columns={"cmc_num": "cmc"})
-        .sort_values("cmc")
-    )
-
-    # Price total
-    price_total = pd.to_numeric(info["price_clean"], errors="coerce").fillna(0).sum()
-
-    # Basics vs non-basics
-    basic_land_names = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
-    land_mask = info["type"].astype(str).str.contains("Land", na=False)
-    basics = info[land_mask & info["name"].isin(basic_land_names)]
-    non_basics = info[land_mask & ~info["name"].isin(basic_land_names)]
-
-    # Functions covered
-    funcs = []
-    for _, r in info.iterrows():
-        cats = (str(r.get("category") or "")).split("|") if pd.notna(r.get("category")) else []
-        for c in cats:
-            c = c.strip()
-            if c:
-                funcs.append(c)
-    fc = (
-        pd.Series(funcs).value_counts().reset_index()
-        .rename(columns={"index": "function", 0: "count"})
-        if funcs else pd.DataFrame(columns=["function", "count"])
-    )
-
-    return {
-        "counts_by_type": counts_by_type,
-        "cmc_curve": curve,
-        "price_total": float(price_total),
-        "basics": int(len(basics)),
-        "non_basics": int(len(non_basics)),
-        "functions_covered": fc,
-        "cards_enriched": info,  # handy table to display/export
-    }

@@ -1,10 +1,19 @@
 # ui/dashboard.py
 from __future__ import annotations
-import streamlit as st
-import plotly.express as px
+
+import numpy as np
 import pandas as pd
+import plotly.express as px
+import streamlit as st
 
 from analysis.stats import inclusion_table, mana_curve, type_breakdown, cooccurrence_matrix
+from analysis.deckgen import (
+    prepare_candidates,
+    fill_deck_slots,
+    generate_average_deck,
+    summarize_deck,
+)
+
 
 def render_parsed(df: pd.DataFrame):
     st.subheader("Parsed Cards")
@@ -13,11 +22,12 @@ def render_parsed(df: pd.DataFrame):
         return
     st.dataframe(df, use_container_width=True, height=300)
 
+
 def render_popularity(
     df: pd.DataFrame,
     *,
     top_n: int = 25,
-    price_cap: float | None = None,   # (cap already applied upstream, but kept for API compat)
+    price_cap: float | None = None,  # (cap already applied upstream, but kept for API compat)
     exclude_types: list[str] | None = None,
     exclude_top_n: int | None = None,
 ):
@@ -29,12 +39,15 @@ def render_popularity(
     st.dataframe(inc.head(50), use_container_width=True, height=420)
     fig = px.bar(
         inc.head(top_n),
-        x="count", y="name", orientation="h",
-        hover_data=["inclusion_rate","avg_price","avg_cmc","type"],
+        x="count",
+        y="name",
+        orientation="h",
+        hover_data=["inclusion_rate", "avg_price", "avg_cmc", "type"],
         title=f"Top {min(top_n,len(inc))} by # of Decks",
     )
     fig.update_layout(yaxis=dict(autorange="reversed"))
     st.plotly_chart(fig, use_container_width=True)
+
 
 def render_curve(df: pd.DataFrame):
     st.subheader("Mana Curve (Spells Only)")
@@ -42,8 +55,11 @@ def render_curve(df: pd.DataFrame):
     if curve.empty:
         st.info("No spell CMC data available.")
         return
-    st.plotly_chart(px.bar(curve, x="cmc", y="count", title="Spell CMC Distribution"),
-                    use_container_width=True)
+    st.plotly_chart(
+        px.bar(curve, x="cmc", y="count", title="Spell CMC Distribution"),
+        use_container_width=True,
+    )
+
 
 def render_types(df: pd.DataFrame):
     st.subheader("Average Card Type Counts per Deck")
@@ -56,13 +72,24 @@ def render_types(df: pd.DataFrame):
         use_container_width=True,
     )
 
+
 def render_cooccurrence(df, top_n=40):
     st.subheader("Card Co-occurrence (Top N)")
 
     colA, colB, colC = st.columns(3)
-    min_decks = colA.slider("Min # decks per card", 1, 10, 2, help="Cards must appear in at least this many decks to be included.")
+    min_decks = colA.slider(
+        "Min # decks per card",
+        1,
+        10,
+        2,
+        help="Cards must appear in at least this many decks to be included.",
+    )
     zero_diag = colB.checkbox("Hide diagonal", True, help="Hide a card co-occurring with itself.")
-    use_norm = colC.checkbox("Normalize (Jaccard similarity)", False, help="Shows association strength instead of raw counts.")
+    use_norm = colC.checkbox(
+        "Normalize (Jaccard similarity)",
+        False,
+        help="Shows association strength instead of raw counts.",
+    )
 
     cooc = cooccurrence_matrix(
         df,
@@ -79,12 +106,14 @@ def render_cooccurrence(df, top_n=40):
     # Build long-form for the heatmap
     matrix = cooc  # already has index/columns named "Card A"/"Card B"
     cooc_long = (
-        matrix.stack(dropna=False)
-              .rename("Co-occurs" if not use_norm else "Jaccard")
-              .reset_index()
+        matrix.stack(dropna=False).rename("Co-occurs" if not use_norm else "Jaccard").reset_index()
     )
 
-    title = "Co-occurrence Heatmap (Deck Count)" if not use_norm else "Co-occurrence Heatmap (Jaccard Similarity)"
+    title = (
+        "Co-occurrence Heatmap (Deck Count)"
+        if not use_norm
+        else "Co-occurrence Heatmap (Jaccard Similarity)"
+    )
     fig_heat = px.density_heatmap(
         cooc_long,
         x="Card A",
@@ -97,12 +126,10 @@ def render_cooccurrence(df, top_n=40):
     )
     fig_heat.update_xaxes(tickangle=-45, tickfont=dict(size=10))
     fig_heat.update_yaxes(tickfont=dict(size=10))
-    fig_heat.update_traces(
-        hovertemplate="A: %{x}<br>B: %{y}<br>Value: %{z}<extra></extra>"
-    )
+    fig_heat.update_traces(hovertemplate="A: %{x}<br>B: %{y}<br>Value: %{z}<extra></extra>")
     fig_heat.update_layout(
         xaxis_nticks=min(50, len(matrix.columns)),
-        yaxis_nticks=min(50, len(matrix.index))
+        yaxis_nticks=min(50, len(matrix.index)),
     )
     st.plotly_chart(fig_heat, use_container_width=True)
     st.caption(
@@ -110,13 +137,6 @@ def render_cooccurrence(df, top_n=40):
         "If hidden, diagonal is zeroed."
     )
 
-# --- Deck Generation UI (uses analysis.deckgen) ---
-from analysis.deckgen import (
-    prepare_candidates,
-    fill_deck_slots,
-    generate_average_deck,
-    summarize_deck,
-)
 
 def _default_type_targets():
     # sensible EDH defaults; adjust to taste
@@ -131,6 +151,7 @@ def _default_type_targets():
         # Land handled separately in the generator; we bias nonlands first
     }
 
+
 def _default_function_targets():
     # Keep short & general. User can tune.
     return {
@@ -144,10 +165,12 @@ def _default_function_targets():
         "Tutor": (0, 4),
     }
 
+
 def _two_int_sliders(col, label, low, high, default_min, default_max):
     m = col.number_input(f"{label} min", min_value=0, max_value=99, value=int(default_min), step=1)
     M = col.number_input(f"{label} max", min_value=m, max_value=99, value=int(default_max), step=1)
     return int(m), int(M)
+
 
 def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | None = None):
     st.header("Deck Template Generator")
@@ -157,11 +180,13 @@ def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | Non
         return
 
     with st.expander("Constraints & Options", expanded=True):
-        c1, c2, c3 = st.columns([1,1,1])
+        c1, c2, c3 = st.columns([1, 1, 1])
 
         total_size = c1.number_input("Deck size", 60, 200, 100, step=1)
         prefer_nonlands = c2.number_input("Prefer non-lands until (count)", 0, 99, 60, step=1)
-        max_price_cap = c3.number_input("Optional per-card price cap (0 = none)", 0.0, 9999.0, 0.0, step=0.5)
+        max_price_cap = c3.number_input(
+            "Optional per-card price cap (0 = none)", 0.0, 9999.0, 0.0, step=0.5
+        )
 
         # TYPE sliders
         st.markdown("**Type targets (min / max)**")
@@ -224,7 +249,7 @@ def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | Non
 
     st.success(f"Generated {len(deck)} cards.")
     # Show list & export
-    out_df = pd.DataFrame({"#": np.arange(1, len(deck)+1), "Card": deck})
+    out_df = pd.DataFrame({"#": np.arange(1, len(deck) + 1), "Card": deck})
     st.dataframe(out_df, use_container_width=True, height=420)
 
     # Download as text / csv
