@@ -7,6 +7,7 @@ import plotly.express as px
 import streamlit as st
 
 from analysis.stats import inclusion_table, mana_curve, type_breakdown, cooccurrence_matrix
+from analysis.synergy import card_synergy_density, card_tag_synergy
 from analysis.deckgen import (
     prepare_candidates,
     fill_deck_slots,
@@ -276,3 +277,46 @@ def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | Non
                 st.info("No spell CMC data available.")
         st.markdown("**Functions Covered**")
         st.dataframe(summary["functions_covered"], use_container_width=True, height=260)
+
+
+def render_synergy_explorer(df: pd.DataFrame, staples: set[str] | None = None) -> None:
+    """Render card and tag synergy exploration tools."""
+    staples = staples or set()
+    if df is None or df.empty:
+        st.info("No card data available for synergy analysis.")
+        return
+
+    st.header("Synergy Explorer")
+
+    with st.expander("Card synergy density (Jaccard-based)", expanded=False):
+        min_decks = st.slider("Minimum decks per card", 2, 10, 3)
+        sy_df = card_synergy_density(df, min_decks=min_decks, exclude=staples)
+        if sy_df.empty:
+            st.info("Not enough data to compute card synergy density.")
+        else:
+            st.dataframe(sy_df, use_container_width=True)
+
+    with st.expander("Top partners for a specific card", expanded=True):
+        from analysis.synergy import _compute_jaccard_matrix
+
+        matrix_df = _compute_jaccard_matrix(df, min_decks=2, exclude=staples)
+        if matrix_df.empty:
+            st.info("Not enough data to compute co-occurrence / Jaccard matrix.")
+        else:
+            card_options = matrix_df.index.tolist()
+            focus = st.selectbox("Select a card", options=card_options)
+            partners = matrix_df.loc[focus].sort_values(ascending=False).head(15)
+            st.write("Top partners by Jaccard similarity:")
+            st.dataframe(
+                partners.reset_index().rename(
+                    columns={"index": "partner", focus: "jaccard"}
+                ),
+                use_container_width=True,
+            )
+
+    with st.expander("Tag-level synergy by card", expanded=False):
+        tag_df = card_tag_synergy(df)
+        if tag_df.empty:
+            st.info("No tag synergy data available (missing or empty 'category' tags).")
+        else:
+            st.dataframe(tag_df, use_container_width=True)

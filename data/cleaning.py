@@ -11,6 +11,9 @@ def clean_and_prepare_data(df: pd.DataFrame, categories_df: pd.DataFrame | None 
 
     work = df.copy()
 
+    if "name" in work.columns:
+        work["name"] = work["name"].astype(str).str.strip()
+
     # normalize price -> price_clean
     if "price_clean" not in work.columns:
         if "price" in work.columns:
@@ -27,9 +30,29 @@ def clean_and_prepare_data(df: pd.DataFrame, categories_df: pd.DataFrame | None 
     # type fallback
     work["type"] = work.get("type", "Unknown").fillna("Unknown")
 
+    if "category" not in work.columns:
+        work["category"] = "Uncategorized"
+    else:
+        work["category"] = work["category"].fillna("Uncategorized").astype(str)
+
     functional = False
     if categories_df is not None and not categories_df.empty and "name" in categories_df.columns:
-        merged = pd.merge(work, categories_df, on="name", how="left")
+        cats = categories_df.copy()
+        cats["name"] = cats["name"].astype(str).str.strip()
+        if "category" not in cats.columns:
+            cats["category"] = ""
+        merged = pd.merge(
+            work,
+            cats[["name", "category"]].rename(columns={"category": "category_tag"}),
+            on="name",
+            how="left",
+        )
+        if "category_tag" in merged.columns:
+            merged["category"] = merged["category_tag"].where(
+                merged["category_tag"].fillna("") != "",
+                merged["category"],
+            )
+            merged.drop(columns=["category_tag"], inplace=True)
         merged["category"] = merged["category"].fillna("Uncategorized")
         work = merged
         functional = True

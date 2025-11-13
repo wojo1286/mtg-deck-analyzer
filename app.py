@@ -4,6 +4,8 @@ import streamlit as st
 from data.scraping import scrape_deck_metadata
 from data.decklists import fetch_decklists_shared
 from data.cleaning import clean_and_prepare_data  # ✅ NEW
+from data.tags import load_card_tags
+from data.staples import load_ci_staples
 
 from ui.dashboard import (
     render_parsed,
@@ -12,9 +14,10 @@ from ui.dashboard import (
     render_types,
     render_cooccurrence,
     render_deck_generator,
+    render_synergy_explorer,
 )
 
-from analysis.stats import budget_filtered
+from analysis.stats import budget_filtered, inclusion_table
 
 from analysis.deckgen import (
     prepare_candidates,
@@ -34,6 +37,12 @@ with st.sidebar:
         help="Example: 'ojer-axonil-deepest-might'",
     )
     deck_limit = st.slider("How many decks to scrape", min_value=1, max_value=50, value=3, step=1)
+
+    ci_key = st.text_input(
+        "Color identity key",
+        value="",
+        help="Used to look up EDHREC staples for this color identity, e.g. 'B', 'UB', 'WUBRG'.",
+    )
 
     st.divider()
     st.header("Budget Preset")
@@ -74,7 +83,23 @@ if df_cards_raw is None or df_cards_raw.empty:
     st.stop()
 
 # ✅ NEW: one-time cleaning/normalization so downstream has price_clean/cmc/category
-df_cards, has_functional, num_decks, pop_all = clean_and_prepare_data(df_cards_raw)
+tags_df = load_card_tags()
+df_cards, has_functional, num_decks, pop_all = clean_and_prepare_data(
+    df_cards_raw, categories_df=tags_df
+)
+
+# Staple flags
+ci_staples = load_ci_staples(ci_key)
+df_cards["is_ci_staple"] = df_cards["name"].isin(ci_staples)
+
+pop = inclusion_table(df_cards)
+if pop.empty:
+    local_staples = set()
+else:
+    local_staples = set(pop.loc[pop["inclusion_rate"] >= 60.0, "name"])
+
+df_cards["is_local_staple"] = df_cards["name"].isin(local_staples)
+df_cards["is_staple"] = df_cards["is_ci_staple"] | df_cards["is_local_staple"]
 
 # --- Apply budget filter once; all charts use this 'filtered' ---
 filtered = budget_filtered(df_cards, cap)
@@ -102,6 +127,9 @@ render_types(filtered)
 
 top_n_cooc = st.slider("Top N cards to include in co-occurrence matrix:", 10, 100, 40, step=5)
 render_cooccurrence(filtered, top_n=top_n_cooc)
+
+staple_names = set(filtered.loc[filtered["is_staple"], "name"])
+render_synergy_explorer(filtered, staples=staple_names)
 
 # --- Deck generation ---
 # Use the cleaned (optionally budget-filtered) data as the source of truth

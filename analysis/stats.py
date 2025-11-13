@@ -167,8 +167,10 @@ def cooccurrence_matrix(
     if keep_cards.empty:
         return pd.DataFrame()
 
-    # Restrict to top_n cards
-    top_cards = keep_cards.head(top_n).index
+    if top_n is None or top_n <= 0 or top_n > len(keep_cards):
+        top_cards = keep_cards.index
+    else:
+        top_cards = keep_cards.head(top_n).index
     dfu = dfu[dfu["name"].isin(top_cards)]
 
     # Build deck → set(cards) mapping
