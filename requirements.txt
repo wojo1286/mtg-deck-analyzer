@@ -12,3 +12,4 @@ st-gsheets-connection
 pyyaml
 gspread
 oauth2client
+nest-asyncio

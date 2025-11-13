@@ -33,10 +33,10 @@ with st.sidebar:
     st.header("Data Source")
     commander = st.text_input(
         "Commander slug (EDHREC)",
-        value="atraxa-praetors-voice",
+        value="krenko-mob-boss",
         help="Example: 'ojer-axonil-deepest-might'",
     )
-    deck_limit = st.slider("How many decks to scrape", min_value=1, max_value=50, value=3, step=1)
+    deck_limit = st.slider("How many decks to scrape", min_value=1, max_value=50, value=30, step=1)
 
     ci_key = st.text_input(
         "Color identity key",

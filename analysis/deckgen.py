@@ -414,3 +414,120 @@ def generate_average_deck(
             names_used.add(nm)
 
     return deck[:tgt]
+
+def summarize_deck(
+    deck: List[str],
+    df_cards: pd.DataFrame,
+    total_size: int | None = None,
+) -> dict:
+    """
+    Build a simple summary of a generated deck for the dashboard.
+
+    Parameters
+    ----------
+    deck : ordered list of card names selected for the deck (may contain duplicates).
+    df_cards : card-level data frame used when generating the deck. Must contain
+        at least `name`, `type`, `cmc`, `price_clean`, and optionally `category`.
+    total_size : nominal deck size target (unused except for sanity checks).
+
+    Returns
+    -------
+    Dict with the following keys:
+        counts_by_type : DataFrame[type, count]
+        cmc_curve      : DataFrame[cmc, count] (spells only)
+        functions_covered : DataFrame[category, count]
+        price_total    : float
+        basics         : int
+        non_basics     : int
+    """
+    if not deck or df_cards is None or df_cards.empty:
+        return {}
+
+    # Ensure the columns we need exist
+    base_cols = ["name", "type", "cmc", "price_clean", "category"]
+    work = df_cards.copy()
+    for c in base_cols:
+        if c not in work.columns:
+            if c == "category":
+                work[c] = ""
+            else:
+                work[c] = pd.NA
+
+    # One row per card name with a "count" of copies in the generated deck
+    deck_df = (
+        pd.DataFrame({"name": deck})
+        .groupby("name")
+        .size()
+        .reset_index(name="count")
+        .merge(work[base_cols], on="name", how="left")
+    )
+
+    # --- Counts by primary type ---
+    counts_by_type = (
+        deck_df.groupby("type")["count"]
+        .sum()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
+    )
+
+    # --- Price total (copies × price_clean, unknown price = 0) ---
+    price_num = pd.to_numeric(deck_df["price_clean"], errors="coerce").fillna(0.0)
+    price_total = float((price_num * deck_df["count"]).sum())
+
+    # --- Land breakdown: basics vs non-basics ---
+    basic_names = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+
+    type_str = deck_df["type"].astype(str)
+    is_land = type_str.str.contains("Land", na=False)
+    is_basic = (
+        deck_df["name"].isin(basic_names)
+        | type_str.str.contains("Basic Land", na=False)
+    )
+
+    basics = int(deck_df.loc[is_basic, "count"].sum())
+    non_basics = int(deck_df.loc[is_land & ~is_basic, "count"].sum())
+
+    # --- CMC curve (spells only, weighted by copies) ---
+    spells = deck_df[~type_str.str.contains("Land", na=False)].copy()
+    spells["cmc_num"] = pd.to_numeric(spells["cmc"], errors="coerce")
+
+    cmc_curve = (
+        spells.loc[spells["cmc_num"].notna()]
+        .groupby("cmc_num")["count"]
+        .sum()
+        .reset_index()
+        .rename(columns={"cmc_num": "cmc"})
+        .sort_values("cmc")
+    )
+
+    # --- Functional coverage from Tagger categories (if present) ---
+    work_cat = deck_df.copy()
+    work_cat["category"] = work_cat["category"].fillna("").astype(str)
+    work_cat["category_list"] = work_cat["category"].str.split("|")
+
+    rows = []
+    for _, row in work_cat.iterrows():
+        for cat in row["category_list"]:
+            if not cat or cat == "Uncategorized":
+                continue
+            rows.append({"category": cat, "count": row["count"]})
+
+    if rows:
+        functions_covered = (
+            pd.DataFrame(rows)
+            .groupby("category")["count"]
+            .sum()
+            .reset_index()
+            .sort_values("count", ascending=False)
+        )
+    else:
+        functions_covered = pd.DataFrame(columns=["category", "count"])
+
+    return {
+        "counts_by_type": counts_by_type,
+        "cmc_curve": cmc_curve,
+        "functions_covered": functions_covered,
+        "price_total": price_total,
+        "basics": basics,
+        "non_basics": non_basics,
+    }
