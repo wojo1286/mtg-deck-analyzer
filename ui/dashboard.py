@@ -173,7 +173,13 @@ def _two_int_sliders(col, label, low, high, default_min, default_max):
     return int(m), int(M)
 
 
-def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | None = None):
+def render_deck_generator(
+    df: pd.DataFrame,
+    *,
+    commander_colors: list[str] | None = None,
+    df_for_average: pd.DataFrame | None = None,
+    default_total_size: int = 100,
+):
     st.header("Deck Template Generator")
 
     if df is None or df.empty:
@@ -183,7 +189,8 @@ def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | Non
     with st.expander("Constraints & Options", expanded=True):
         c1, c2, c3 = st.columns([1, 1, 1])
 
-        total_size = c1.number_input("Deck size", 60, 200, 100, step=1)
+        total_size = c1.number_input("Deck size", 60, 200, int(default_total_size), step=1)
+        st.session_state["target_deck_size"] = int(total_size)
         prefer_nonlands = c2.number_input("Prefer non-lands until (count)", 0, 99, 60, step=1)
         max_price_cap = c3.number_input(
             "Optional per-card price cap (0 = none)", 0.0, 9999.0, 0.0, step=0.5
@@ -232,8 +239,12 @@ def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | Non
 
     deck: list[str] | None = None
 
+    source_for_average = df_for_average if df_for_average is not None else work
+
     if go_avg:
-        deck = generate_average_deck(work, total_size=total_size, commander_colors=commander_colors)
+        deck = generate_average_deck(
+            source_for_average, total_size=total_size, commander_colors=commander_colors
+        )
 
     if go_constrained:
         deck = fill_deck_slots(
@@ -259,7 +270,8 @@ def render_deck_generator(df: pd.DataFrame, *, commander_colors: list[str] | Non
 
     # Summary
     st.subheader("Deck Summary")
-    summary = summarize_deck(deck, work, total_size=total_size)
+    summary_source = source_for_average if go_avg else work
+    summary = summarize_deck(deck, summary_source, total_size=total_size)
     if summary:
         cc1, cc2 = st.columns(2)
         with cc1:
