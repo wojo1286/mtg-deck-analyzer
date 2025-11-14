@@ -37,7 +37,13 @@ def _get_browser():
     return browser, playwright
 
 
-def _fetch_html(url: str, wait_selector: str = "table", retries: int = 3) -> str | None:
+def _fetch_html(
+    url: str,
+    *,
+    wait_selector: str = "table",
+    retries: int = 3,
+    page_size: int | None = None,
+) -> str | None:
     """Fetches HTML and waits for deck table to load (sync API)."""
     browser, playwright = _get_browser()
     context = browser.new_context(ignore_https_errors=True)
@@ -47,6 +53,30 @@ def _fetch_html(url: str, wait_selector: str = "table", retries: int = 3) -> str
         try:
             page.goto(url, timeout=60000)
             page.wait_for_selector(wait_selector, timeout=25000)
+
+            if page_size:
+                try:
+                    if page_size == 100:
+                        locator = page.locator("text='100'")
+                    else:
+                        locator = page.locator(f"text='{page_size}'")
+                    if locator.count():
+                        locator.first.click(timeout=5000)
+                        page.wait_for_timeout(1000)
+                    else:
+                        selectors = (
+                            "button:has-text('100')" if page_size == 100 else f"button:has-text('{page_size}')",
+                            "a:has-text('100')" if page_size == 100 else f"a:has-text('{page_size}')",
+                            "li:has-text('100')" if page_size == 100 else f"li:has-text('{page_size}')",
+                        )
+                        for sel in selectors:
+                            if page.is_visible(sel):
+                                page.click(sel, timeout=5000)
+                                page.wait_for_timeout(1000)
+                                break
+                except Exception:
+                    pass
+
             html = page.content()
             context.close()
             return html
@@ -61,7 +91,11 @@ def _fetch_html(url: str, wait_selector: str = "table", retries: int = 3) -> str
 
 @st.cache_data(show_spinner=False)
 def scrape_deck_metadata(
-    commander_slug: str, bracket: str = "all", budget: str = "all"
+    commander_slug: str,
+    *,
+    max_decks: int = 100,
+    bracket: str = "all",
+    budget: str = "all",
 ) -> pd.DataFrame:
     """
     Scrapes the /decks/<commander> page to extract deck URLs and metadata (sync API).
@@ -73,7 +107,7 @@ def scrape_deck_metadata(
     base_url = f"https://edhrec.com/decks/{commander_slug}"
     url = f"{base_url}?p=1"
 
-    html = _fetch_html(url, wait_selector="table")
+    html = _fetch_html(url, wait_selector="table", page_size=100)
 
     if not html:
         return pd.DataFrame(
@@ -98,7 +132,11 @@ def scrape_deck_metadata(
         st.warning(f"No deck table found for {commander_slug}")
         return pd.DataFrame()
 
-    for row in table.find_all("tr")[1:]:
+    rows = table.find_all("tr")[1:]
+    if max_decks and max_decks > 0:
+        rows = rows[: int(max_decks)]
+
+    for row in rows:
         cols = row.find_all("td")
         if len(cols) < 3:
             continue
