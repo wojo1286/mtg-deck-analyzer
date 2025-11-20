@@ -1,3 +1,4 @@
+# Legacy Streamlit entrypoint retained for historical reference only. This file is no longer used.
 # ===================================================================
 # 1. SETUP & IMPORTS
 # ===================================================================
