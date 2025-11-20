@@ -187,12 +187,20 @@ def render_deck_generator(
         return
 
     with st.expander("Constraints & Options", expanded=True):
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
 
         total_size = c1.number_input("Deck size", 60, 200, int(default_total_size), step=1)
         st.session_state["target_deck_size"] = int(total_size)
         prefer_nonlands = c2.number_input("Prefer non-lands until (count)", 0, 99, 60, step=1)
-        max_price_cap = c3.number_input(
+        default_land_target = int(round(float(total_size) * 0.37))
+        land_target = c3.number_input(
+            "Target land count (avg deck)",
+            min_value=0,
+            max_value=int(total_size),
+            value=max(0, min(int(total_size), default_land_target)),
+            step=1,
+        )
+        max_price_cap = c4.number_input(
             "Optional per-card price cap (0 = none)", 0.0, 9999.0, 0.0, step=0.5
         )
 
@@ -243,7 +251,10 @@ def render_deck_generator(
 
     if go_avg:
         deck = generate_average_deck(
-            source_for_average, total_size=total_size, commander_colors=commander_colors
+            source_for_average,
+            total_size=total_size,
+            commander_colors=commander_colors,
+            target_land_count=int(land_target),
         )
 
     if go_constrained:

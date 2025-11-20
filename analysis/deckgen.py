@@ -67,6 +67,27 @@ def _split_categories(series: pd.Series) -> List[List[str]]:
     return [v.split("|") if v else [] for v in vals]
 
 
+# Preferred order for primary type reporting
+_PRIMARY_TYPE_ORDER = [
+    "Creature",
+    "Instant",
+    "Sorcery",
+    "Artifact",
+    "Enchantment",
+    "Planeswalker",
+    "Land",
+]
+
+
+def _extract_primary_type_local(type_value: str | None) -> str:
+    """Simple primary type extractor that avoids external dependencies."""
+    text = str(type_value or "")
+    for candidate in _PRIMARY_TYPE_ORDER:
+        if candidate in text:
+            return candidate
+    return "Unknown"
+
+
 # ---------------------------
 # Candidate preparation
 # ---------------------------
@@ -294,14 +315,18 @@ def generate_average_deck(
     *,
     total_size: int = 100,
     commander_colors: List[str] | None = None,
+    target_land_count: int | None = None,
     land_target: int | None = None,
 ) -> List[str]:
     """
     Builds an “average” shell that explicitly budgets land slots:
-    - Targets a land count (default ~37 for a 100-card deck, scaled otherwise).
+    - Targets a land count (default ~37% of deck size, clamped to [30, 40] for EDH).
     - Uses non-basic lands from the scraped pool when available.
     - Fills remaining land slots with basics based on commander color identity.
     - Fills the rest with the most popular spells (non-lands).
+
+    `target_land_count` is the preferred knob; `land_target` is kept for
+    backward compatibility and will override `target_land_count` when set.
     """
     if df is None or df.empty:
         return []
@@ -314,13 +339,15 @@ def generate_average_deck(
     except Exception:
         tgt = 100
 
+    # Backwards compatibility: `land_target` overrides `target_land_count` if provided
+    land_target = target_land_count if target_land_count is not None else land_target
     if land_target is None:
-        # EDH heuristic: ~37 lands for a 100-card deck, scaled linearly otherwise
+        # EDH heuristic: ~37% lands for a 100-card deck, clamped to [30, 40]
         land_target = max(30, min(40, round(tgt * 0.37)))
     land_target = min(tgt, max(0, int(land_target)))
 
-    spells = df[~df["type"].astype(str).str.contains("Land", na=False)]
-    land_df = df[df["type"].astype(str).str.contains("Land", na=False)]
+    spells = df[~df["type"].astype(str).str.contains("Land", na=False)].copy()
+    land_df = df[df["type"].astype(str).str.contains("Land", na=False)].copy()
     non_basic_land_df = land_df[~land_df["name"].isin(basic_land_names)]
 
     def _popularity(frame: pd.DataFrame) -> pd.DataFrame:
@@ -343,14 +370,11 @@ def generate_average_deck(
     spell_pop = _popularity(spells)
     land_pop = _popularity(non_basic_land_df)
 
-    names_used: set[str] = set()
     deck: list[str] = []
 
-    # 1) Pick non-basic lands up to the target
+    # 1) Pick non-basic lands up to the target (unique by name for variety)
     num_nonbasic_needed = min(land_target, len(land_pop))
-    for _, row in land_pop.head(num_nonbasic_needed).iterrows():
-        deck.append(row["name"])
-        names_used.add(row["name"])
+    deck.extend(land_pop.head(num_nonbasic_needed)["name"].tolist())
 
     # 2) Fill remaining land slots with basics informed by commander colors
     basics_needed = land_target - num_nonbasic_needed
@@ -360,40 +384,41 @@ def generate_average_deck(
         q, r = divmod(basics_needed, len(basics_pool))
         for idx, bname in enumerate(basics_pool):
             copies = q + (1 if idx < r else 0)
-            if copies > 0:
-                deck.extend([bname] * copies)
-                names_used.add(bname)
+            deck.extend([bname] * copies)
 
-    # 3) Fill the rest with the most popular spells (avoid commander double-counts)
+    # 3) Fill the rest with the most popular spells (avoid duplicates until exhausted)
     spells_needed = tgt - len(deck)
     if spells_needed > 0 and not spell_pop.empty:
+        used_names: set[str] = set(deck)
         for _, row in spell_pop.iterrows():
             if len(deck) >= tgt:
                 break
             nm = row["name"]
-            if nm in names_used:
+            if nm in used_names:
                 continue
             deck.append(nm)
-            names_used.add(nm)
+            used_names.add(nm)
 
-    # 4) If still short (e.g., limited dataset), backfill with any remaining card names
+    # 4) Backfill with any remaining unique card names if still short
     if len(deck) < tgt:
+        used_names = set(deck)
         remaining = (
-            df[~df["name"].isin(names_used)]["name"].dropna().drop_duplicates().tolist()
+            df[~df["name"].isin(used_names)]["name"].dropna().drop_duplicates().tolist()
         )
         for nm in remaining:
             if len(deck) >= tgt:
                 break
             deck.append(nm)
-            names_used.add(nm)
+            used_names.add(nm)
 
-    if len(deck) < tgt:
-        if not spell_pop.empty:
-            idx = 0
-            while len(deck) < tgt and idx < 5 * len(spell_pop):
-                deck.append(spell_pop.iloc[idx % len(spell_pop)]["name"])
-                idx += 1
+    # 5) Allow repeats of popular spells if the pool is very small
+    if len(deck) < tgt and not spell_pop.empty:
+        idx = 0
+        while len(deck) < tgt:
+            deck.append(spell_pop.iloc[idx % len(spell_pop)]["name"])
+            idx += 1
 
+    # 6) Final safety: pad with basics if the dataset is extremely sparse
     if len(deck) < tgt:
         color_map = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
         basics_pool = [color_map[c] for c in commander_colors if c in color_map] or ["Wastes"]
@@ -424,7 +449,7 @@ def summarize_deck(
     Returns
     -------
     Dict with the following keys:
-        counts_by_type : DataFrame[type, count]
+        counts_by_type : DataFrame[type, count] derived strictly from deck_df rows
         cmc_curve      : DataFrame[cmc, count] (spells only)
         functions_covered : DataFrame[category, count]
         price_total    : float
@@ -441,23 +466,26 @@ def summarize_deck(
         if c not in work.columns:
             work[c] = "" if c == "category" else pd.NA
 
-    # Deduplicate metadata per card name and join against the full deck list
+    # Deduplicate metadata per card name and join against the full deck list (one row per card slot)
     meta = work[base_cols].dropna(subset=["name"]).drop_duplicates(subset=["name"], keep="first")
-    deck_df = pd.DataFrame({"name": deck}).merge(meta, on="name", how="left")
+    deck_df = pd.DataFrame({"slot": range(1, len(deck) + 1), "name": deck}).merge(
+        meta, on="name", how="left"
+    )
 
     # Primary type extraction for consistent grouping
-    from data.parsing import _extract_primary_type
-
-    deck_df["primary_type"] = (
-        deck_df["type"]
-        .apply(lambda x: _extract_primary_type(str(x)) if pd.notna(x) else None)
-        .fillna("Unknown")
+    deck_df["primary_type"] = deck_df["type"].apply(_extract_primary_type_local).fillna(
+        "Unknown"
     )
 
     # --- Counts by primary type ---
-    counts_by_type = (
-        deck_df.groupby("primary_type").size().reset_index(name="count").sort_values("count", ascending=False)
+    deck_df["summary_type"] = deck_df["primary_type"].where(
+        deck_df["primary_type"].isin(_PRIMARY_TYPE_ORDER), "Other"
     )
+    type_order_with_other = _PRIMARY_TYPE_ORDER + ["Other"]
+    counts_by_type = (
+        deck_df["summary_type"].value_counts().reindex(type_order_with_other, fill_value=0).reset_index()
+    )
+    counts_by_type.columns = ["type", "count"]
 
     # --- Price total (copies × price_clean, unknown price = 0) ---
     price_num = pd.to_numeric(deck_df["price_clean"], errors="coerce").fillna(0.0)
@@ -466,20 +494,21 @@ def summarize_deck(
     # --- Land breakdown: basics vs non-basics ---
     basic_names = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
     type_str = deck_df["type"].astype(str)
-    is_land = deck_df["primary_type"].eq("Land") | type_str.str.contains("Land", na=False)
+    is_land = deck_df["summary_type"].eq("Land") | type_str.str.contains("Land", na=False)
     is_basic = deck_df["name"].isin(basic_names) | type_str.str.contains("Basic Land", na=False)
-    basics = int(is_basic.sum())
+    basics = int((is_land & is_basic).sum())
     non_basics = int((is_land & ~is_basic).sum())
 
     # --- CMC curve (spells only, weighted by copies) ---
     spells = deck_df[~is_land].copy()
     spells["cmc_num"] = pd.to_numeric(spells["cmc"], errors="coerce")
+    spells = spells[spells["cmc_num"].notna()]
+    spells["cmc_int"] = spells["cmc_num"].round().astype(int)
     cmc_curve = (
-        spells.loc[spells["cmc_num"].notna()]
-        .groupby("cmc_num")
+        spells.groupby("cmc_int")
         .size()
         .reset_index(name="count")
-        .rename(columns={"cmc_num": "cmc"})
+        .rename(columns={"cmc_int": "cmc"})
         .sort_values("cmc")
     )
 
@@ -488,19 +517,21 @@ def summarize_deck(
     work_cat["category"] = work_cat["category"].fillna("").astype(str)
     work_cat["category_list"] = work_cat["category"].str.split("|")
 
-    rows = []
+    rows: list[dict] = []
     for _, row in work_cat.iterrows():
         for cat in row["category_list"]:
-            if not cat or cat == "Uncategorized":
+            cat_clean = cat.strip()
+            if not cat_clean or cat_clean == "Uncategorized":
                 continue
-            rows.append({"category": cat})
+            rows.append({"category": cat_clean})
 
     if rows:
         functions_covered = (
             pd.DataFrame(rows)
-            .value_counts()
+            .groupby("category")
+            .size()
             .reset_index(name="count")
-            .sort_values("count", ascending=False)
+            .sort_values(["count", "category"], ascending=[False, True])
         )
     else:
         functions_covered = pd.DataFrame(columns=["category", "count"])
