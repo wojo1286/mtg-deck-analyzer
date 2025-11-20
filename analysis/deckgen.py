@@ -294,165 +294,115 @@ def generate_average_deck(
     *,
     total_size: int = 100,
     commander_colors: List[str] | None = None,
+    land_target: int | None = None,
 ) -> List[str]:
     """
-    Builds an “average” shell:
-    - mean counts per type across decks
-    - average non-basic lands
-    - fills basics by commander color identity
-    - fills remaining with most popular spells
+    Builds an “average” shell that explicitly budgets land slots:
+    - Targets a land count (default ~37 for a 100-card deck, scaled otherwise).
+    - Uses non-basic lands from the scraped pool when available.
+    - Fills remaining land slots with basics based on commander color identity.
+    - Fills the rest with the most popular spells (non-lands).
     """
     if df is None or df.empty:
         return []
 
     basic_land_names = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+    commander_colors = commander_colors or []
 
-    per_deck_counts = df.groupby("deck_id").size()
-    basics_inferred = (total_size - per_deck_counts).clip(lower=0)
+    try:
+        tgt = max(1, int(total_size))
+    except Exception:
+        tgt = 100
 
-    types_per_deck = (
-        df.assign(primary_type=df["type"].astype(str))
-        .groupby(["deck_id", "primary_type"])
-        .size()
-        .unstack(fill_value=0)
-    )
-    avg_types = types_per_deck.mean().sort_values(ascending=False)
-
-    land_df = df[df["type"].astype(str).str.contains("Land", na=False)]
-    non_basic_land_df = land_df[~land_df["name"].isin(basic_land_names)]
-    avg_non_basics = (
-        non_basic_land_df.groupby("deck_id").size().mean() if not non_basic_land_df.empty else 0.0
-    )
-
-    avg_basics = basics_inferred.mean() if not basics_inferred.empty else 0.0
-
-    template = avg_types.copy()
-    template["Non-Basic Land"] = round(avg_non_basics)
-    template["Basic Land"] = round(avg_basics)
-    if "Land" in template:
-        template = template.drop(labels=["Land"])
-
-    tgt = total_size
-    if int(round(template.sum())) <= 0:
-        return []
-
-    scaled = (template / template.sum() * tgt).round().astype(int)
-    drift = tgt - int(scaled.sum())
-    if drift != 0 and not scaled.empty:
-        scaled.iloc[0] += drift
-
-    names_used: set[str] = set()
-    deck: List[str] = []
+    if land_target is None:
+        # EDH heuristic: ~37 lands for a 100-card deck, scaled linearly otherwise
+        land_target = max(30, min(40, round(tgt * 0.37)))
+    land_target = min(tgt, max(0, int(land_target)))
 
     spells = df[~df["type"].astype(str).str.contains("Land", na=False)]
-    if _HAS_INC_TABLE:
-        pop = inclusion_table(spells)[["name", "count"]].rename(columns={"count": "deck_count"})
-    else:
-        pop = spells.groupby("name")["deck_id"].nunique().reset_index(name="deck_count")
-    pop = pop.sort_values(["deck_count", "name"], ascending=[False, True])
+    land_df = df[df["type"].astype(str).str.contains("Land", na=False)]
+    non_basic_land_df = land_df[~land_df["name"].isin(basic_land_names)]
 
-    def _pull(predicate, n: int):
-        nonlocal deck, names_used
-        if n <= 0:
-            return
-
-        def _normalize_mask(data: pd.DataFrame) -> pd.Series:
-            result = predicate(data)
-            if isinstance(result, pd.Series):
-                return result.astype(bool)
-            if isinstance(result, (list, tuple)):
-                return pd.Series(list(result), index=data.index).astype(bool)
-            try:
-                flag = bool(result)
-            except Exception:
-                flag = False
-            return pd.Series(flag, index=data.index)
-
-        mask = _normalize_mask(spells)
-        pool = (
-            spells[mask]
-            .drop_duplicates(subset=["name"])
-            .merge(pop, on="name", how="left")
-            .sort_values(["deck_count", "name"], ascending=[False, True])
+    def _popularity(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=["name", "deck_count"])
+        if _HAS_INC_TABLE:
+            pop_df = inclusion_table(frame)[["name", "count"]].rename(
+                columns={"count": "deck_count"}
+            )
+        else:
+            pop_df = (
+                frame.groupby("name")["deck_id"]
+                .nunique()
+                .reset_index(name="deck_count")
+            )
+        return pop_df.sort_values(["deck_count", "name"], ascending=[False, True]).reset_index(
+            drop=True
         )
 
-        satisfying_names = set(pool["name"].tolist())
+    spell_pop = _popularity(spells)
+    land_pop = _popularity(non_basic_land_df)
 
-        def _current_count() -> int:
-            if satisfying_names:
-                return sum(1 for nm in deck if nm in satisfying_names)
-            total = 0
-            for nm in deck:
-                df_ = spells[spells["name"] == nm]
-                if df_.empty:
-                    continue
-                val = predicate(df_)
-                if isinstance(val, pd.Series):
-                    count = int(val.sum())
-                else:
-                    try:
-                        count = int(val)
-                    except Exception:
-                        try:
-                            count = 1 if bool(val) else 0
-                        except Exception:
-                            count = 0
-                if count > 0:
-                    total += 1
-            return total
+    names_used: set[str] = set()
+    deck: list[str] = []
 
-        for _, r in pool.iterrows():
+    # 1) Pick non-basic lands up to the target
+    num_nonbasic_needed = min(land_target, len(land_pop))
+    for _, row in land_pop.head(num_nonbasic_needed).iterrows():
+        deck.append(row["name"])
+        names_used.add(row["name"])
+
+    # 2) Fill remaining land slots with basics informed by commander colors
+    basics_needed = land_target - num_nonbasic_needed
+    if basics_needed > 0:
+        color_map = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
+        basics_pool = [color_map[c] for c in commander_colors if c in color_map] or ["Wastes"]
+        q, r = divmod(basics_needed, len(basics_pool))
+        for idx, bname in enumerate(basics_pool):
+            copies = q + (1 if idx < r else 0)
+            if copies > 0:
+                deck.extend([bname] * copies)
+                names_used.add(bname)
+
+    # 3) Fill the rest with the most popular spells (avoid commander double-counts)
+    spells_needed = tgt - len(deck)
+    if spells_needed > 0 and not spell_pop.empty:
+        for _, row in spell_pop.iterrows():
             if len(deck) >= tgt:
                 break
-            nm = r["name"]
+            nm = row["name"]
             if nm in names_used:
                 continue
             deck.append(nm)
             names_used.add(nm)
-            if _current_count() >= n:
-                break
 
-    for t, n in scaled.items():
-        if n <= 0 or "Land" in t:
-            continue
-        _pull(lambda df_: df_["type"].astype(str).eq(t), int(n))
-
-    num_nb = int(scaled.get("Non-Basic Land", 0))
-    if num_nb > 0 and not non_basic_land_df.empty:
-        nb_pop = (
-            non_basic_land_df.groupby("name")["deck_id"]
-            .nunique()
-            .reset_index(name="deck_count")
-            .sort_values(["deck_count", "name"], ascending=[False, True])
+    # 4) If still short (e.g., limited dataset), backfill with any remaining card names
+    if len(deck) < tgt:
+        remaining = (
+            df[~df["name"].isin(names_used)]["name"].dropna().drop_duplicates().tolist()
         )
-        for _, r in nb_pop.iterrows():
-            if len(deck) >= tgt or num_nb <= 0:
+        for nm in remaining:
+            if len(deck) >= tgt:
                 break
-            nm = r["name"]
-            if nm in names_used:
-                continue
             deck.append(nm)
             names_used.add(nm)
-            num_nb -= 1
-
-    num_basic = int(scaled.get("Basic Land", 0))
-    if num_basic > 0:
-        color_map = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
-        basics = [color_map[c] for c in (commander_colors or []) if c in color_map] or ["Wastes"]
-        q, r = divmod(num_basic, len(basics))
-        for i, b in enumerate(basics):
-            deck.extend([b] * (q + (1 if i < r else 0)))
 
     if len(deck) < tgt:
-        for _, r in pop.iterrows():
-            if len(deck) >= tgt:
-                break
-            nm = r["name"]
-            if nm in names_used:
-                continue
-            deck.append(nm)
-            names_used.add(nm)
+        if not spell_pop.empty:
+            idx = 0
+            while len(deck) < tgt and idx < 5 * len(spell_pop):
+                deck.append(spell_pop.iloc[idx % len(spell_pop)]["name"])
+                idx += 1
 
+    if len(deck) < tgt:
+        color_map = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
+        basics_pool = [color_map[c] for c in commander_colors if c in color_map] or ["Wastes"]
+        idx = 0
+        while len(deck) < tgt:
+            deck.append(basics_pool[idx % len(basics_pool)])
+            idx += 1
+
+    # Final safety trim/pad
     return deck[:tgt]
 
 def summarize_deck(
@@ -461,7 +411,8 @@ def summarize_deck(
     total_size: int | None = None,
 ) -> dict:
     """
-    Build a simple summary of a generated deck for the dashboard.
+    Build a summary of a generated deck for the dashboard, using the deck list
+    as the single source of truth (one row per card instance).
 
     Parameters
     ----------
@@ -488,54 +439,46 @@ def summarize_deck(
     work = df_cards.copy()
     for c in base_cols:
         if c not in work.columns:
-            if c == "category":
-                work[c] = ""
-            else:
-                work[c] = pd.NA
+            work[c] = "" if c == "category" else pd.NA
 
-    # One row per card name with a "count" of copies in the generated deck
-    deck_df = (
-        pd.DataFrame({"name": deck})
-        .groupby("name")
-        .size()
-        .reset_index(name="count")
-        .merge(work[base_cols], on="name", how="left")
+    # Deduplicate metadata per card name and join against the full deck list
+    meta = work[base_cols].dropna(subset=["name"]).drop_duplicates(subset=["name"], keep="first")
+    deck_df = pd.DataFrame({"name": deck}).merge(meta, on="name", how="left")
+
+    # Primary type extraction for consistent grouping
+    from data.parsing import _extract_primary_type
+
+    deck_df["primary_type"] = (
+        deck_df["type"]
+        .apply(lambda x: _extract_primary_type(str(x)) if pd.notna(x) else None)
+        .fillna("Unknown")
     )
 
     # --- Counts by primary type ---
     counts_by_type = (
-        deck_df.groupby("type")["count"]
-        .sum()
-        .reset_index(name="count")
-        .sort_values("count", ascending=False)
+        deck_df.groupby("primary_type").size().reset_index(name="count").sort_values("count", ascending=False)
     )
 
     # --- Price total (copies × price_clean, unknown price = 0) ---
     price_num = pd.to_numeric(deck_df["price_clean"], errors="coerce").fillna(0.0)
-    price_total = float((price_num * deck_df["count"]).sum())
+    price_total = float(price_num.sum())
 
     # --- Land breakdown: basics vs non-basics ---
     basic_names = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
-
     type_str = deck_df["type"].astype(str)
-    is_land = type_str.str.contains("Land", na=False)
-    is_basic = (
-        deck_df["name"].isin(basic_names)
-        | type_str.str.contains("Basic Land", na=False)
-    )
-
-    basics = int(deck_df.loc[is_basic, "count"].sum())
-    non_basics = int(deck_df.loc[is_land & ~is_basic, "count"].sum())
+    is_land = deck_df["primary_type"].eq("Land") | type_str.str.contains("Land", na=False)
+    is_basic = deck_df["name"].isin(basic_names) | type_str.str.contains("Basic Land", na=False)
+    basics = int(is_basic.sum())
+    non_basics = int((is_land & ~is_basic).sum())
 
     # --- CMC curve (spells only, weighted by copies) ---
-    spells = deck_df[~type_str.str.contains("Land", na=False)].copy()
+    spells = deck_df[~is_land].copy()
     spells["cmc_num"] = pd.to_numeric(spells["cmc"], errors="coerce")
-
     cmc_curve = (
         spells.loc[spells["cmc_num"].notna()]
-        .groupby("cmc_num")["count"]
-        .sum()
-        .reset_index()
+        .groupby("cmc_num")
+        .size()
+        .reset_index(name="count")
         .rename(columns={"cmc_num": "cmc"})
         .sort_values("cmc")
     )
@@ -550,14 +493,13 @@ def summarize_deck(
         for cat in row["category_list"]:
             if not cat or cat == "Uncategorized":
                 continue
-            rows.append({"category": cat, "count": row["count"]})
+            rows.append({"category": cat})
 
     if rows:
         functions_covered = (
             pd.DataFrame(rows)
-            .groupby("category")["count"]
-            .sum()
-            .reset_index()
+            .value_counts()
+            .reset_index(name="count")
             .sort_values("count", ascending=False)
         )
     else:
