@@ -355,12 +355,52 @@ def generate_average_deck(
         nonlocal deck, names_used
         if n <= 0:
             return
+
+        def _normalize_mask(data: pd.DataFrame) -> pd.Series:
+            result = predicate(data)
+            if isinstance(result, pd.Series):
+                return result.astype(bool)
+            if isinstance(result, (list, tuple)):
+                return pd.Series(list(result), index=data.index).astype(bool)
+            try:
+                flag = bool(result)
+            except Exception:
+                flag = False
+            return pd.Series(flag, index=data.index)
+
+        mask = _normalize_mask(spells)
         pool = (
-            spells[predicate(spells)]
+            spells[mask]
             .drop_duplicates(subset=["name"])
             .merge(pop, on="name", how="left")
             .sort_values(["deck_count", "name"], ascending=[False, True])
         )
+
+        satisfying_names = set(pool["name"].tolist())
+
+        def _current_count() -> int:
+            if satisfying_names:
+                return sum(1 for nm in deck if nm in satisfying_names)
+            total = 0
+            for nm in deck:
+                df_ = spells[spells["name"] == nm]
+                if df_.empty:
+                    continue
+                val = predicate(df_)
+                if isinstance(val, pd.Series):
+                    count = int(val.sum())
+                else:
+                    try:
+                        count = int(val)
+                    except Exception:
+                        try:
+                            count = 1 if bool(val) else 0
+                        except Exception:
+                            count = 0
+                if count > 0:
+                    total += 1
+            return total
+
         for _, r in pool.iterrows():
             if len(deck) >= tgt:
                 break
@@ -369,7 +409,7 @@ def generate_average_deck(
                 continue
             deck.append(nm)
             names_used.add(nm)
-            if len([x for x in deck if predicate(spells[spells["name"] == x])]) >= n:
+            if _current_count() >= n:
                 break
 
     for t, n in scaled.items():

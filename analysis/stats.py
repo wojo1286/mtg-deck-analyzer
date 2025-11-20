@@ -128,6 +128,72 @@ def type_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     return avg.sort_values("avg_count_per_deck", ascending=False)
 
 
+def augment_with_basic_lands(
+    df: pd.DataFrame,
+    commander_colors: list[str] | None,
+    target_size: int = 100,
+) -> pd.DataFrame:
+    """Ensure each deck has virtual basic lands to reach the target size."""
+    if df is None or df.empty or "deck_id" not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    try:
+        tgt = max(0, int(target_size))
+    except Exception:
+        tgt = 100
+
+    if tgt <= 0:
+        return df.copy()
+
+    color_map = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
+    commander_colors = [c for c in (commander_colors or []) if c in color_map]
+
+    extra_rows: list[dict] = []
+    base_cols = list(df.columns)
+
+    for deck_id, sub in df.groupby("deck_id"):
+        missing = max(0, tgt - int(len(sub)))
+        if missing <= 0:
+            continue
+
+        basics = [color_map[c] for c in commander_colors]
+        if not basics:
+            basics = ["Wastes"]
+
+        q, r = divmod(missing, len(basics))
+
+        for idx, land_name in enumerate(basics):
+            count = q + (1 if idx < r else 0)
+            if count <= 0:
+                continue
+            for _ in range(count):
+                row = {col: pd.NA for col in base_cols}
+                row["deck_id"] = deck_id
+                if "deck_name" in sub.columns:
+                    row["deck_name"] = sub["deck_name"].iloc[0]
+                if "deck_url" in sub.columns:
+                    row["deck_url"] = sub["deck_url"].iloc[0]
+                row["name"] = land_name
+                row["type"] = "Land"
+                if "cmc" in base_cols:
+                    row["cmc"] = 0
+                if "price_clean" in base_cols:
+                    row["price_clean"] = 0.0
+                if "price" in base_cols:
+                    row["price"] = "$0.00"
+                if "qty" in base_cols:
+                    row["qty"] = 1
+                if "category" in base_cols:
+                    row["category"] = "Basic Land"
+                extra_rows.append(row)
+
+    if not extra_rows:
+        return df.copy()
+
+    basics_df = pd.DataFrame(extra_rows)
+    return pd.concat([df, basics_df], ignore_index=True, sort=False)
+
+
 # ---------- Co-occurrence (top N by inclusion) ----------
 
 
