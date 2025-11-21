@@ -104,7 +104,7 @@ if clear_clicked:
     st.session_state.pop("ci_key", None)
     st.session_state.pop("target_deck_size", None)
     st.cache_data.clear()
-    st.experimental_rerun()
+    st.rerun()
 
 
 if fetch_clicked:
@@ -302,7 +302,7 @@ with st.expander("Tag Editor", expanded=False):
                 st.session_state["tags_editor_df"] = updated[
                     updated["name"].isin(current_card_names)
                 ]
-                st.experimental_rerun()
+                st.rerun()
 
     if col_save.button("Save edited tags back to sheet", disabled=not sheet_available):
         try:
