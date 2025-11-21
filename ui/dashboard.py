@@ -340,6 +340,9 @@ def render_synergy_explorer(df: pd.DataFrame, staples: set[str] | None = None) -
     with st.expander("Tag-level synergy by card", expanded=False):
         tag_df = card_tag_synergy(df)
         if tag_df.empty:
-            st.info("No tag synergy data available (missing or empty 'category' tags).")
+            st.info(
+                "No tag synergy data available for the current card pool. "
+                "Add categories in the Tag Editor or expand the scope to include more tags."
+            )
         else:
             st.dataframe(tag_df, use_container_width=True)

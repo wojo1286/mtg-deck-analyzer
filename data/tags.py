@@ -18,6 +18,12 @@ from core.cache import ensure_playwright
 from core.gsheets import safe_read_gsheet, safe_update_gsheet
 
 
+def _empty_tags_df() -> pd.DataFrame:
+    """Return a consistently shaped, empty tag DataFrame."""
+
+    return pd.DataFrame(columns=["name", "category"])
+
+
 def _sheet_id() -> str | None:
     """
     Return the configured Google Sheet ID from st.secrets, or None if
@@ -55,7 +61,12 @@ def _sheet_id() -> str | None:
 
 def has_gsheet_categories() -> bool:
     """True if a Google Sheet is configured for tag categories; False otherwise."""
-    return _sheet_id() is not None
+    try:
+        return _sheet_id() is not None
+    except StreamlitSecretNotFoundError:
+        return False
+    except Exception:
+        return False
 
 
 @st.cache_data(show_spinner=False)
@@ -69,20 +80,10 @@ def load_card_tags() -> pd.DataFrame:
     """
     path = Path(__file__).with_name("card_tags.csv")
     if not path.exists():
-        return pd.DataFrame(columns=["name", "category"])
+        return _empty_tags_df()
 
     df = pd.read_csv(path)
-
-    if "name" not in df.columns:
-        df["name"] = ""
-    if "category" not in df.columns:
-        df["category"] = ""
-
-    df["name"] = df["name"].astype(str).str.strip()
-    df["category"] = df["category"].fillna("").astype(str)
-
-    # Only return the columns we actually care about
-    return df[["name", "category"]]
+    return normalize_tags_df(df)
 
 
 @st.cache_data(show_spinner=False)
@@ -94,25 +95,28 @@ def load_tags_from_gsheet(worksheet: str = "Categories") -> pd.DataFrame:
     the sheet cannot be read, this returns an empty DataFrame with the
     expected columns so the app can fall back to local CSV tags.
     """
-    sheet_id = _sheet_id()
+    try:
+        sheet_id = _sheet_id()
+    except StreamlitSecretNotFoundError:
+        return _empty_tags_df()
+    except Exception:
+        return _empty_tags_df()
+
     if not sheet_id:
         # No configured sheet → just return empty and let caller decide fallback
-        return pd.DataFrame(columns=["name", "category"])
+        return _empty_tags_df()
 
-    df = safe_read_gsheet(sheet_id, worksheet)
+    try:
+        df = safe_read_gsheet(sheet_id, worksheet)
+    except StreamlitSecretNotFoundError:
+        return _empty_tags_df()
+    except Exception:
+        return _empty_tags_df()
 
     if df is None or df.empty:
-        return pd.DataFrame(columns=["name", "category"])
+        return _empty_tags_df()
 
-    if "name" not in df.columns:
-        df["name"] = ""
-    if "category" not in df.columns:
-        df["category"] = ""
-
-    df["name"] = df["name"].astype(str).str.strip()
-    df["category"] = df["category"].fillna("").astype(str)
-
-    return df[["name", "category"]]
+    return normalize_tags_df(df)
 
 
 def save_tags_to_gsheet(df: pd.DataFrame, worksheet: str = "Categories") -> None:
@@ -134,6 +138,74 @@ def save_tags_to_gsheet(df: pd.DataFrame, worksheet: str = "Categories") -> None
     work["category"] = work["category"].fillna("").astype(str)
 
     safe_update_gsheet(sheet_id, worksheet, work)
+
+
+def _merge_categories(values: pd.Series) -> str:
+    """Helper to combine multiple category strings into a deduped pipe list."""
+
+    tags: list[str] = []
+    for raw in values:
+        text = str(raw or "")
+        parts = [p.strip() for p in text.split("|") if p.strip()]
+        tags.extend(parts)
+    if not tags:
+        return ""
+    # Preserve deterministic order while deduping
+    seen: list[str] = []
+    for tag in tags:
+        if tag not in seen:
+            seen.append(tag)
+    return "|".join(seen)
+
+
+def normalize_tags_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean and deduplicate a tags DataFrame.
+
+    Ensures columns ["name", "category"] exist, strips whitespace, fills NA,
+    and merges duplicate names by aggregating their categories with "|".
+    """
+
+    if df is None or df.empty:
+        return _empty_tags_df()
+
+    work = df.copy()
+    if "name" not in work.columns:
+        work["name"] = ""
+    if "category" not in work.columns:
+        work["category"] = ""
+
+    work["name"] = work["name"].astype(str).str.strip()
+    work["category"] = work["category"].fillna("").astype(str).str.strip()
+
+    aggregated = (
+        work.groupby("name", as_index=False)["category"].apply(_merge_categories)
+    )
+    return aggregated[["name", "category"]]
+
+
+@st.cache_data(show_spinner=False)
+def load_tag_categories() -> pd.DataFrame:
+    """
+    Load card role tags with clear precedence rules.
+
+    Precedence:
+        1) Google Sheets (worksheet "Categories") when configured and non-empty
+        2) Local CSV `card_tags.csv` as a fallback
+        3) Empty DataFrame with columns ["name", "category"]
+
+    Returns a cleaned, deduplicated DataFrame based on the first available source.
+    """
+
+    sheet_df = load_tags_from_gsheet()
+    if sheet_df is not None and not sheet_df.empty:
+        return normalize_tags_df(sheet_df)
+
+    csv_df = load_card_tags()
+    if csv_df is not None and not csv_df.empty:
+        return normalize_tags_df(csv_df)
+
+    return _empty_tags_df()
 
 
 @st.cache_data(show_spinner=False)
