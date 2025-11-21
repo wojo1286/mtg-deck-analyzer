@@ -170,6 +170,9 @@ Avoid stale browser objects across reruns (fix greenlet.error).
 
 When a browser/context fails, close and recreate it safely.
 
+✅ Switch EDHREC scraping backend to the legacy-style JSON + deckpreview flow with the
+   defensive parse_table logic and per-deck skip-on-error handling.
+
  Support multi-page EDHREC deck metadata scraping:
 
 Iterate p=1,2,3... with page_size=100 until max_decks or no more rows.
