@@ -11,8 +11,8 @@ from data.scraping import scrape_deck_metadata
 from data.staples import load_ci_staples
 from data.tags import (
     has_gsheet_categories,
-    load_card_tags,
-    load_tags_from_gsheet,
+    load_tag_categories,
+    normalize_tags_df,
     save_tags_to_gsheet,
     scrape_scryfall_tagger,
 )
@@ -142,20 +142,24 @@ if df_cards_raw is None or df_cards_raw.empty:
 st.session_state["target_deck_size"] = int(target_deck_size)
 
 # --- Tag loading ---------------------------------------------------------
-gsheet_tags = load_tags_from_gsheet()
-fallback_tags = load_card_tags()
-if "tags_editor_df" not in st.session_state:
-    base_tags = gsheet_tags if not gsheet_tags.empty else fallback_tags
-    st.session_state["tags_editor_df"] = base_tags.copy()
+loaded_tags = load_tag_categories()
+if "all_tags_df" not in st.session_state or st.session_state.get("all_tags_df") is None:
+    st.session_state["all_tags_df"] = loaded_tags.copy()
+else:
+    st.session_state["all_tags_df"] = normalize_tags_df(st.session_state["all_tags_df"])
 
-active_tags = st.session_state.get("tags_editor_df")
-if active_tags is None or active_tags.empty:
-    active_tags = gsheet_tags if not gsheet_tags.empty else fallback_tags
-    st.session_state["tags_editor_df"] = active_tags.copy()
+all_tags_df = st.session_state.get("all_tags_df", loaded_tags).copy()
+all_tags_df = normalize_tags_df(all_tags_df)
+st.session_state["all_tags_df"] = all_tags_df
+
+name_series = df_cards_raw.get("name", pd.Series(dtype=str)).dropna().astype(str).str.strip()
+current_card_names = set(name_series[name_series != ""].unique())
+tags_for_current_cards = all_tags_df[all_tags_df["name"].isin(current_card_names)].copy()
+st.session_state["tags_editor_df"] = tags_for_current_cards
 
 # --- Cleaning and enrichment --------------------------------------------
 df_cards, has_functional, num_decks_scraped, pop_all = clean_and_prepare_data(
-    df_cards_raw, categories_df=st.session_state["tags_editor_df"]
+    df_cards_raw, categories_df=tags_for_current_cards
 )
 
 if df_cards.empty:
@@ -221,7 +225,25 @@ with st.expander("Tag Editor", expanded=False):
     st.markdown(
         "Edit card categories. Google Sheets is the primary source and CSV is used as a fallback."
     )
-    editor_df = st.session_state["tags_editor_df"].copy()
+    scope_options = ["Only current scraped cards", "All known tagged cards"]
+    default_scope = st.session_state.get("tag_editor_scope", scope_options[0])
+    default_idx = scope_options.index(default_scope) if default_scope in scope_options else 0
+    scope_choice = st.selectbox(
+        "Scope",
+        options=scope_options,
+        index=default_idx,
+        help="Choose whether to edit just the scraped card pool or all stored tags.",
+        key="tag_editor_scope_select",
+    )
+    st.session_state["tag_editor_scope"] = scope_choice
+
+    current_scraped_names = set(df_cards["name"].dropna().unique())
+    if scope_choice == scope_options[0]:
+        editor_df = all_tags_df[all_tags_df["name"].isin(current_scraped_names)]
+    else:
+        editor_df = all_tags_df
+
+    editor_df = editor_df.copy()
     if "name" not in editor_df.columns:
         editor_df["name"] = ""
     if "category" not in editor_df.columns:
@@ -235,20 +257,31 @@ with st.expander("Tag Editor", expanded=False):
         use_container_width=True,
         key="tag_editor_table",
     )
-    st.session_state["tags_editor_df"] = edited
+    edited_clean = normalize_tags_df(edited)
+
+    if scope_choice == scope_options[0]:
+        names_in_view = set(editor_df["name"].astype(str).str.strip())
+        remaining = all_tags_df[~all_tags_df["name"].isin(names_in_view)]
+        merged = pd.concat([remaining, edited_clean], ignore_index=True)
+    else:
+        merged = edited_clean
+
+    merged_clean = normalize_tags_df(merged)
+    st.session_state["all_tags_df"] = merged_clean
+    st.session_state["tags_editor_df"] = merged_clean[merged_clean["name"].isin(current_card_names)]
 
     col_fetch, col_save = st.columns(2)
 
     fetch_disabled = not sheet_available or df_cards.empty
     if col_fetch.button("Fetch tags from Scryfall Tagger to Google Sheet", disabled=fetch_disabled):
         base_lookup = (
-            edited.assign(category=edited["category"].astype(str).str.strip())
+            merged_clean.assign(category=merged_clean["category"].astype(str).str.strip())
             .dropna(subset=["name"])
             .set_index("name")["category"]
         )
         missing_cards = [
             name
-            for name in df_cards["name"].dropna().unique()
+            for name in current_scraped_names
             if base_lookup.get(name, "").strip() == ""
         ]
         if not missing_cards:
@@ -259,24 +292,21 @@ with st.expander("Tag Editor", expanded=False):
             if scraped.empty:
                 st.warning("Scraping finished, but no new tags were found.")
             else:
-                merged = pd.concat([edited, scraped], ignore_index=True)
-                merged = (
-                    merged.dropna(subset=["name"])
-                    .drop_duplicates(subset=["name"], keep="last")
-                    .sort_values("name")
-                    .reset_index(drop=True)
-                )
+                updated = normalize_tags_df(pd.concat([merged_clean, scraped], ignore_index=True))
                 try:
-                    save_tags_to_gsheet(merged)
+                    save_tags_to_gsheet(updated.sort_values("name").reset_index(drop=True))
                     st.success("Google Sheet updated with scraped tags.")
                 except Exception as exc:  # pragma: no cover - GSheets runtime
                     st.error(f"Failed to update Google Sheet: {exc}")
-                st.session_state["tags_editor_df"] = merged
+                st.session_state["all_tags_df"] = updated
+                st.session_state["tags_editor_df"] = updated[
+                    updated["name"].isin(current_card_names)
+                ]
                 st.experimental_rerun()
 
     if col_save.button("Save edited tags back to sheet", disabled=not sheet_available):
         try:
-            save_tags_to_gsheet(edited.sort_values("name").reset_index(drop=True))
+            save_tags_to_gsheet(merged_clean.sort_values("name").reset_index(drop=True))
             st.success("Google Sheet updated successfully!")
         except Exception as exc:  # pragma: no cover - GSheets runtime
             st.error(f"Failed to update Google Sheet: {exc}")

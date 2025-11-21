@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
 def _compute_jaccard_matrix(
@@ -56,6 +57,7 @@ def _compute_jaccard_matrix(
     return M
 
 
+@st.cache_data(show_spinner=False)
 def card_synergy_density(
     df: pd.DataFrame,
     min_decks: int = 2,
@@ -85,6 +87,7 @@ def card_synergy_density(
     return out.sort_values("synergy_density", ascending=False).reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
 def card_tag_synergy(df: pd.DataFrame, deck_col: str | None = None) -> pd.DataFrame:
     """
     Compute tag-level synergy for tagged cards.
@@ -120,40 +123,30 @@ def card_tag_synergy(df: pd.DataFrame, deck_col: str | None = None) -> pd.DataFr
 
     work = df.copy()
 
+    if "name" not in work.columns:
+        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
+
     # Normalize category strings
+    work = work.dropna(subset=[deck_col, "name"])
     cat = work.get("category")
     if cat is None:
         # No tags at all
         return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
 
-    work["category"] = (
-        cat.fillna("")
-        .astype(str)
-        .str.strip()
-    )
+    work["category"] = cat.fillna("").astype(str).str.strip()
 
     # Expand tags: one row per (name, deck, tag)
-    tag_rows: list[tuple[str, object, str]] = []
+    expanded = work.copy()
+    expanded["tag"] = expanded["category"].str.split("|")
+    expanded = expanded.explode("tag")
+    expanded["tag"] = expanded["tag"].fillna("").astype(str).str.strip()
+    expanded = expanded[(expanded["tag"] != "") & (expanded["tag"].str.lower() != "uncategorized")]
 
-    for _, row in work.iterrows():
-        raw = row["category"]
-        if not raw:
-            continue
-        if isinstance(raw, str) and raw.lower() == "uncategorized":
-            continue
-
-        tags = [t.strip() for t in raw.split("|") if t.strip()]
-        if not tags:
-            continue
-
-        for tag in tags:
-            tag_rows.append((row["name"], row[deck_col], tag))
-
-    if not tag_rows:
+    if expanded.empty:
         # No actual tags -> nothing to compute
         return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
 
-    tags_df = pd.DataFrame(tag_rows, columns=["name", deck_col, "tag"])
+    tags_df = expanded[["name", deck_col, "tag"]]
 
     # Universe of decks
     n_decks = work[deck_col].nunique()

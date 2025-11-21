@@ -124,3 +124,25 @@ def test_functions_covered_counts_all_tags():
     assert func_counts["Card Advantage"] == 2
     assert func_counts["Removal"] == 1
     assert summary["counts_by_type"]["count"].sum() == len(deck)
+
+
+def test_summarize_deck_deduplicates_metadata_rows():
+    df = pd.DataFrame(
+        {
+            "deck_id": ["d1"] * 4,
+            "name": ["Command Tower", "Command Tower", "Swamp", "Swamp"],
+            "type": ["Land", "Land", "Basic Land — Swamp", "Basic Land — Swamp"],
+            "cmc": [0, 0, 0, 0],
+            "price_clean": [0.5, 1.0, 0.05, 0.05],
+            "category": ["Fixing", "", "", ""],
+        }
+    )
+
+    deck = ["Command Tower", "Swamp", "Swamp"]
+    summary = summarize_deck(deck, df)
+
+    assert summary["counts_by_type"]["count"].sum() == len(deck)
+    land_count = summary["counts_by_type"].set_index("type").loc["Land", "count"]
+    assert land_count == summary["basics"] + summary["non_basics"]
+    assert summary["basics"] == 2
+    assert summary["non_basics"] == 1
