@@ -85,74 +85,117 @@ def card_synergy_density(
     return out.sort_values("synergy_density", ascending=False).reset_index(drop=True)
 
 
-def card_tag_synergy(
-    df: pd.DataFrame,
-    min_decks: int = 2,
-    category_col: str = "category",
-) -> pd.DataFrame:
-    """Compute simple tag-level synergy metrics for each card."""
+def card_tag_synergy(df: pd.DataFrame, deck_col: str | None = None) -> pd.DataFrame:
+    """
+    Compute tag-level synergy for tagged cards.
+
+    Expects a row-per-card-per-deck DataFrame `df` with at least:
+      - 'name'      : card name
+      - 'category'  : pipe-delimited tags, e.g. 'Ramp|Mana Rock'
+      - a deck id column (see `deck_col`)
+
+    Returns a DataFrame with columns:
+      ['name', 'tag', 'delta', 'p_tag_given', 'p_tag']
+
+    Where:
+      - p_tag       = P(tag appears in a deck)
+      - p_tag_given = P(tag appears in a deck | card is in that deck)
+      - delta       = p_tag_given - p_tag (synergy vs baseline)
+    """
+
     if df is None or df.empty:
         return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
-    if "deck_id" not in df.columns or "name" not in df.columns:
-        raise ValueError("DataFrame must contain 'deck_id' and 'name' columns")
-    if category_col not in df.columns:
-        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
 
-    work = df.copy()
-    work[category_col] = work[category_col].fillna("").astype(str)
-    work["category_list"] = work[category_col].str.split("|")
-
-    deck_tag = (
-        work.explode("category_list")
-        .query("category_list != '' and category_list != 'Uncategorized'")
-        .drop_duplicates(subset=["deck_id", "category_list"])
-    )
-    if deck_tag.empty:
-        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
-
-    num_decks = df["deck_id"].nunique()
-    if num_decks == 0:
-        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
-
-    tag_decks = deck_tag.groupby("category_list")["deck_id"].nunique()
-    p_tag = (tag_decks / num_decks).to_dict()
-
-    card_decks = (
-        work[["name", "deck_id"]]
-        .drop_duplicates()
-        .groupby("name")["deck_id"]
-        .apply(set)
-        .to_dict()
-    )
-
-    rows: list[dict[str, float | str]] = []
-    for card, dset in card_decks.items():
-        if len(dset) < min_decks:
-            continue
-        sub_tags = deck_tag[deck_tag["deck_id"].isin(dset)]
-        if sub_tags.empty:
-            continue
-        tag_counts = sub_tags.groupby("category_list")["deck_id"].nunique()
-        for tag, decks_with_tag in tag_counts.items():
-            p_tag_given = decks_with_tag / len(dset)
-            base = p_tag.get(tag, 0.0)
-            rows.append(
-                {
-                    "name": card,
-                    "tag": tag,
-                    "delta": p_tag_given - base,
-                    "p_tag_given": p_tag_given,
-                    "p_tag": base,
-                }
+    # Work out which column identifies decks
+    if deck_col is None:
+        for candidate in ("deck_id", "deck_idx", "deck_index", "deck"):
+            if candidate in df.columns:
+                deck_col = candidate
+                break
+        else:
+            raise KeyError(
+                "card_tag_synergy() could not find a deck id column. "
+                "Expected one of: 'deck_id', 'deck_idx', 'deck_index', 'deck'."
             )
 
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
+    work = df.copy()
 
-    return (
-        out.sort_values(["name", "delta"], ascending=[True, False])
-        .groupby("name")
-        .head(5)
-        .reset_index(drop=True)
+    # Normalize category strings
+    cat = work.get("category")
+    if cat is None:
+        # No tags at all
+        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
+
+    work["category"] = (
+        cat.fillna("")
+        .astype(str)
+        .str.strip()
     )
+
+    # Expand tags: one row per (name, deck, tag)
+    tag_rows: list[tuple[str, object, str]] = []
+
+    for _, row in work.iterrows():
+        raw = row["category"]
+        if not raw:
+            continue
+        if isinstance(raw, str) and raw.lower() == "uncategorized":
+            continue
+
+        tags = [t.strip() for t in raw.split("|") if t.strip()]
+        if not tags:
+            continue
+
+        for tag in tags:
+            tag_rows.append((row["name"], row[deck_col], tag))
+
+    if not tag_rows:
+        # No actual tags -> nothing to compute
+        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
+
+    tags_df = pd.DataFrame(tag_rows, columns=["name", deck_col, "tag"])
+
+    # Universe of decks
+    n_decks = work[deck_col].nunique()
+    if n_decks == 0:
+        return pd.DataFrame(columns=["name", "tag", "delta", "p_tag_given", "p_tag"])
+
+    # How often each tag appears in decks
+    decks_with_tag = tags_df.groupby("tag")[deck_col].nunique().rename("decks_with_tag")
+    p_tag = decks_with_tag / float(n_decks)
+
+    # How often each card appears in decks
+    decks_with_card = work.groupby("name")[deck_col].nunique().rename("decks_with_card")
+
+    # How often each (card, tag) pair appears together in decks
+    card_tag_decks = (
+        tags_df.groupby(["name", "tag"])[deck_col]
+        .nunique()
+        .rename("decks_with_both")
+    )
+
+    result = card_tag_decks.to_frame().reset_index()
+
+    result = result.merge(
+        decks_with_card.reset_index(),
+        on="name",
+        how="left",
+    )
+
+    result = result.merge(
+        p_tag.rename("p_tag").reset_index(),
+        on="tag",
+        how="left",
+    )
+
+    # Probabilities
+    result["p_tag_given"] = (
+        result["decks_with_both"] / result["decks_with_card"].replace(0, np.nan)
+    )
+    result["delta"] = result["p_tag_given"] - result["p_tag"]
+
+    # Clean up and sort – cards with the highest positive delta first
+    result = result[["name", "tag", "delta", "p_tag_given", "p_tag"]]
+    result = result.sort_values(["delta", "name", "tag"], ascending=[False, True, True])
+
+    return result.reset_index(drop=True)
