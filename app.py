@@ -6,8 +6,7 @@ import streamlit as st
 
 from analysis.stats import augment_with_basic_lands, budget_filtered, inclusion_table
 from data.cleaning import clean_and_prepare_data
-from data.decklists import fetch_decklists_shared
-from data.scraping import scrape_deck_metadata
+from data.decklists import scrape_edhrec_decks_for_commander
 from data.staples import load_ci_staples
 from data.tags import (
     has_gsheet_categories,
@@ -54,11 +53,20 @@ with st.sidebar:
         value=commander_default,
         help="Example: 'ojer-axonil-deepest-might'",
     )
+    bracket_options = {
+        "All Decks": "",
+        "Budget": "budget",
+        "Upgraded": "upgraded",
+        "Optimized": "optimized",
+        "cEDH": "cedh",
+    }
+    bracket_name = st.selectbox("Select Bracket Level", options=list(bracket_options.keys()))
+    bracket_slug = bracket_options.get(bracket_name, "")
     num_decks = st.slider(
         "How many decks to scrape",
         10,
-        100,
-        min(max(10, num_decks_default), 100),
+        200,
+        min(max(10, num_decks_default), 200),
         step=10,
     )
     ci_key = st.text_input(
@@ -116,23 +124,26 @@ if fetch_clicked:
         st.session_state["ci_key"] = ci_key
         st.session_state["target_deck_size"] = int(target_deck_size)
 
-        with st.spinner(f"Fetching EDHREC deck metadata for commander: {commander_slug}"):
-            deck_meta = scrape_deck_metadata(commander_slug, max_decks=int(num_decks))
-        st.session_state["deck_data"] = deck_meta
+        with st.spinner(
+            f"Scraping up to {num_decks} decks for {commander_slug} ({bracket_name}) and parsing card tables..."
+        ):
+            cards_raw, commander_colors = scrape_edhrec_decks_for_commander(
+                commander_slug,
+                deck_limit=int(num_decks),
+                bracket_slug=bracket_slug,
+                bracket_name=bracket_name,
+            )
+        st.session_state["df_cards_raw"] = cards_raw
+        st.session_state["commander_colors"] = commander_colors
+        st.session_state["last_scraped_slug"] = commander_slug
+        st.session_state["last_scraped_bracket"] = bracket_slug
 
-        if deck_meta is None or deck_meta.empty:
-            st.warning("No deck metadata returned. Try a different commander slug or check connectivity.")
-        else:
-            with st.spinner(f"Scraping up to {num_decks} decks and parsing card tables..."):
-                cards_raw = fetch_decklists_shared(deck_meta, max_decks=int(num_decks))
-            st.session_state["df_cards_raw"] = cards_raw
-            if cards_raw is None or cards_raw.empty:
-                st.warning(
-                    "No cards were parsed from any deck. Try a different commander or increase the number of decks."
-                )
+        if cards_raw is None or cards_raw.empty:
+            st.warning(
+                "No cards were parsed from any deck. Try a different commander or increase the number of decks."
+            )
 
 
-deck_meta = st.session_state.get("deck_data")
 df_cards_raw = st.session_state.get("df_cards_raw")
 
 if df_cards_raw is None or df_cards_raw.empty:
@@ -185,7 +196,7 @@ if filtered is None or filtered.empty:
 
 st.session_state["filtered"] = filtered
 
-commander_colors = _parse_colors(ci_key)
+commander_colors = st.session_state.get("commander_colors") or _parse_colors(ci_key)
 
 target_deck_size = int(st.session_state.get("target_deck_size", target_deck_size))
 filtered_with_basics = augment_with_basic_lands(
