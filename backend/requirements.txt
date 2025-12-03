@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+requests
+beautifulsoup4
+# if you use Playwright or other scraping deps in Python, also add:
+# playwright
+# bs4 is included via beautifulsoup4
